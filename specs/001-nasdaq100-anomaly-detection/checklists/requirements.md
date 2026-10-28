@@ -43,3 +43,7 @@
   self-inclusion limitation were all resolved by explicit user decisions and folded into the
   Functional Requirements, Key Entities, Edge Cases, and Assumptions sections. The tie-break rule
   is no longer an assumption (FR-010 now states it directly as alphabetical-by-ticker).
+- 2026-10-28 clarification session: resolved re-run-with-changed-data semantics (reject, FR-018),
+  single-evaluated-day-per-run scope (FR-021), and the 20-day volume window's minimum-data rule
+  (FR-011). Recorded in a new `## Clarifications` section and reflected in the affected FRs, Key
+  Entities, and Edge Cases. All checklist items still pass; no regressions.

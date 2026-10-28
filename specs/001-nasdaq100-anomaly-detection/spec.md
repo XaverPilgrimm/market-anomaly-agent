@@ -8,6 +8,14 @@
 
 **Input**: User description: "Feature: Nasdaq-100 universe and daily anomaly detection. Before each US market open, identify the Nasdaq-100 stocks whose move on the previous trading day was unusual relative to the overall market. These flagged cases are the input for all later steps (evidence gathering, agent judgment, signals). Requirements cover: a frozen Nasdaq-100 universe with snapshot date and source; daily adjusted open/close/volume for every universe stock and a Nasdaq-100 benchmark; a market-model-based abnormal return and z-score per stock over a trailing 120-trading-day window; flagging stocks with |z| >= 2, capped at 10 per day with the rest recorded as skipped; a volume ratio for every flagged case; skipping stocks with insufficient history or missing data, with the reason logged; New York time / US market calendar handling; and idempotent, versioned, timestamped storage of results. Out of scope: evidence gathering, the agent, signals, the website, deployment. Success: reproducible results, hand-checked test coverage for every calculation, no paid APIs needed."
 
+## Clarifications
+
+### Session 2026-10-28
+
+- Q: If detection is re-run for a day whose underlying price data has changed since the original run (e.g., a vendor correction or dividend-adjustment restatement), should the system overwrite the stored result, keep it immutable and store a superseding revision, or reject the re-run? → A: Reject — the re-run must reproduce the existing stored result for that day; if the input data no longer matches what originally produced it, the run fails loudly and stores nothing (no overwrite, no superseding revision).
+- Q: Does a single detection run always evaluate exactly one trading day, or must it also catch up multiple missed days in one run? → A: Single day per run — detection always takes one explicit evaluated day as input; catching up after a missed run means invoking it once per missed day, handled outside this feature.
+- Q: When there's a gap inside a stock's 20-trading-day volume-averaging window (used for the volume ratio on flagged cases), should the system average over whatever days are available, or treat the volume ratio as unavailable? → A: Average available, minimum 10 days — the volume ratio is computed over whatever trading days are actually present in the 20-day window, but only when at least 10 of those days have volume data; with fewer than 10, the volume ratio is recorded as unavailable with a reason, and the case remains flagged.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Daily anomaly flagging before market open (Priority: P1)
@@ -114,8 +122,15 @@ history, and every other stock is evaluated normally.
 - More than 10 stocks qualify on one day: only the top 10 by absolute z-score (after tie-breaking)
   are kept; every other qualifying stock is recorded as skipped with a cap-exceeded reason, never
   silently dropped.
-- Detection is re-run for a day it has already evaluated: the stored result for that day is
-  unchanged — no duplicate records are created.
+- Detection is re-run for a day it has already evaluated with unchanged input data: the stored
+  result for that day is reproduced — no duplicate records are created.
+- Detection is re-run for a day it has already evaluated but the underlying price data has since
+  changed (e.g., a vendor correction): the run fails loudly and stores nothing, leaving the
+  original stored result for that day untouched.
+- A flagged case's 20-trading-day volume-averaging window has gaps: the volume ratio is computed
+  over whatever days are available, as long as at least 10 are present; with fewer than 10
+  available days, the volume ratio is recorded as unavailable with a reason, while the case
+  remains flagged.
 - A company has more than one share class in the real-world Nasdaq-100: only one class (GOOGL,
   not GOOG, for Alphabet) is part of the universe, so the same company is never evaluated twice
   under two tickers.
@@ -156,7 +171,10 @@ history, and every other stock is evaluated normally.
   was exceeded.
 - **FR-011**: For every flagged anomaly case, the system MUST compute a volume ratio equal to the
   evaluated day's volume divided by the stock's average daily volume over the preceding 20 trading
-  days.
+  days, using whatever trading days are actually available within that window. When fewer than 10
+  trading days of volume data are available within that window, the system MUST record the volume
+  ratio as unavailable for that case, with the reason logged, instead of averaging over fewer than
+  10 days.
 - **FR-012**: The system MUST skip a stock for an evaluated day, and log the specific reason, when
   fewer than 60 trading days of price history are available before that day (a reason indicating
   insufficient history), or when its data for the evaluated day is missing or otherwise unusable
@@ -177,12 +195,19 @@ history, and every other stock is evaluated normally.
 - **FR-017**: For each evaluated trading day, the system MUST persist every skipped stock together
   with its specific skip reason.
 - **FR-018**: Re-running detection for a trading day that has already been evaluated MUST NOT
-  create duplicate stored records for that day.
+  create duplicate stored records for that day. If the re-run's input price data matches what
+  originally produced the stored result, the re-run MUST reproduce that result without creating
+  duplicates. If the input price data differs from what originally produced the stored result
+  (for example, a vendor correction or restatement), the re-run MUST fail without storing,
+  modifying, or superseding any record for that day.
 - **FR-019**: Universe construction and daily detection MUST NOT require any paid API or paid data
   subscription.
 - **FR-020**: Given the same input price data, repeated detection runs for the same evaluated day
   MUST produce identical evaluated-stock records, flagged cases, skipped records, and computed
   numbers.
+- **FR-021**: Each detection run MUST take exactly one explicit evaluated trading day as input.
+  Processing multiple missed evaluated days MUST be achieved by invoking the run once per missed
+  day; a single run MUST NOT process a range of days on its own.
 
 ### Key Entities
 
@@ -199,7 +224,9 @@ history, and every other stock is evaluated normally.
   enough history and data to be evaluated — carries its return, market-model-expected return,
   abnormal return, and z-score, whether or not the stock ended up flagged.
 - **Anomaly Case**: The subset of Evaluated Stock Records whose absolute z-score met the flagging
-  threshold and was kept under the daily cap — additionally carries the volume ratio.
+  threshold and was kept under the daily cap — additionally carries the volume ratio, or an
+  explicit "unavailable" state with a reason when fewer than 10 of the preceding 20 trading days
+  have volume data.
 - **Skipped Stock Record**: A stock that, for a specific evaluated trading day, was either not
   evaluated (insufficient history, missing data) or qualified as an anomaly case but was not kept
   because of the daily cap. Carries the specific reason. Stocks that were evaluated but did not
@@ -238,6 +265,10 @@ history, and every other stock is evaluated normally.
 - This feature produces and stores data only; it exposes no user interface. Evidence gathering,
   the agent, signal generation, and the public website are separate, later features that consume
   this feature's output.
+- Scheduling detection to run once per trading day, and catching up on any missed day by invoking
+  it again for that specific day, is an orchestration concern outside this feature (e.g., the
+  daily job scheduler). This feature's detection operation itself always takes exactly one
+  explicit evaluated day per run.
 - **Known limitation**: the Nasdaq-100 benchmark itself contains the evaluated stock (for every
   universe constituent, since the universe is the index). As a result, abnormal returns for the
   largest constituents — which carry the most weight in the benchmark — are slightly understated,
