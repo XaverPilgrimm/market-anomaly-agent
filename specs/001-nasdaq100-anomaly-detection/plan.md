@@ -15,7 +15,7 @@ stocks whose |z-score| ≥ 2, compute a volume ratio for each flagged case, and 
 and never silently duplicate or overwrite a prior result. Delivered as pure, hand-testable
 calculation functions plus a thin CLI (`uv run detect --date YYYY-MM-DD`) and a small PostgreSQL
 schema, with the frozen Nasdaq-100 universe captured once from Invesco's QQQ holdings and daily
-adjusted bars fetched from Financial Modeling Prep's free tier (see research.md).
+adjusted bars fetched from Twelve Data's free Basic plan (see research.md).
 
 ## Technical Context
 
@@ -44,8 +44,8 @@ the spec) and are left to a future deployment feature
 entry point (no web/mobile component)
 
 **Performance Goals**: No hard SLA; a full run (≈101 symbols, one evaluated day) should complete
-well inside the pre-market window — practically, under a few minutes, dominated by ~101 sequential
-HTTP calls to the price-data vendor
+well inside the pre-market window — practically, about 13 minutes, dominated by ~101 sequential
+HTTP calls to the price-data vendor at the free plan's limit of 8 requests per minute
 
 **Constraints**: No paid API or data subscription (FR-019/SC-003); must stay within the chosen
 price-data vendor's free-tier rate limits (research.md §1); detection must be exactly reproducible
@@ -69,7 +69,7 @@ invocation (FR-021)
 | III. Research Integrity | PASS — universe frozen and committed with snapshot date/source (FR-001–003); every stored record carries a timestamp and a rule version (FR-014); decisions (flagged/evaluated/skipped) are stored before any downstream outcome exists, matching "stored with a timestamp before its outcome is known"; skipped/capped stocks are recorded, never dropped (FR-017); re-runs cannot silently rewrite history (FR-018) |
 | IV. Security | PASS — DB credentials and the price-data API key are read from the environment only, never logged (cli-contract.md); this feature has no agent/tool-calling surface yet, so "agent tools read-only" does not apply here but is not violated either |
 | V. Cost Control | PASS (adapted) — no paid API is used, so no spending cap is needed for this feature; the free-tier *rate limit* is still enforced in code (adapter-level backoff, research.md §6), which is the spirit of this principle even without a dollar cap |
-| VI. Data and Compliance | PASS — the chosen vendor's terms (storage permitted during active use) are checked and documented (research.md §1); the public site (a later feature) will publish only derived numbers, never raw vendor bars, so no redistribution-licensing conflict arises from this feature |
+| VI. Data and Compliance | PASS for this feature, which publishes nothing — the candidate vendors' terms on storage, public display of derived data and attribution are quoted and compared in research.md §1. Open item for the public site (a later feature): the site shows no prices and no per-stock returns. Each case instead links to the stock's public historical quote page, `https://www.nasdaq.com/market-activity/stocks/{ticker}/historical`, with `{ticker}` in lowercase (e.g. `.../stocks/aapl/historical`). The site shows only z-scores, classifications (flagged / evaluated / skipped), the agent's explanations and aggregated group results. Even these are derived from vendor data, so they stay unpublished until the written permission listed in research.md §1 is on file |
 | VII. Observability | PASS (scoped) — every run is recorded as a `detection_runs` row with its rule version and computation timestamp (FR-014); this feature has no agent, so the full "tool calls, token usage" trace in Principle VII targets the future agent feature, not this one |
 | VIII. Testing and Quality | PASS — test-first pure functions with hand-checked examples (SC-002); price-data vendor always mocked in tests; `mypy --strict` and `ruff`; small, reviewable scope (one feature, three user stories) |
 | Technology Constraints — Python 3.12+/uv | PASS |
@@ -122,7 +122,7 @@ src/market_anomaly_agent/
 ├── data/
 │   ├── __init__.py
 │   ├── source.py                     # PriceDataSource Protocol (contracts/price-data-source-interface.md)
-│   └── fmp_source.py                  # FMP adapter implementing PriceDataSource
+│   └── twelvedata_source.py           # Twelve Data adapter implementing PriceDataSource
 ├── storage/
 │   ├── __init__.py
 │   ├── db.py                         # psycopg connection helper

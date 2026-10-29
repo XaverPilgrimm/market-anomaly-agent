@@ -19,7 +19,7 @@ uv run detect --date YYYY-MM-DD
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string (e.g. `postgresql://...@host.containers.internal:5432/...` when run inside the agent-box container) |
-| `PRICE_DATA_API_KEY` | API key for the price-data adapter (FMP by default — see research.md §1) |
+| `PRICE_DATA_API_KEY` | API key for the price-data adapter (Twelve Data by default — see research.md §1) |
 
 Secrets are read from the environment only; they are never logged or printed (constitution
 Principle IV).

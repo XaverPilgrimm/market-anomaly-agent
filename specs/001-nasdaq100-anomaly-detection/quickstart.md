@@ -11,7 +11,7 @@ implementation itself.
 - `uv` installed.
 - A PostgreSQL instance reachable at `DATABASE_URL` (locally: `podman compose up -d db`, see
   below).
-- An API key for the price-data vendor (FMP free plan — research.md §1), exported as
+- An API key for the price-data vendor (Twelve Data free Basic plan — research.md §1), exported as
   `PRICE_DATA_API_KEY`.
 - The frozen universe file committed at `src/market_anomaly_agent/universe/nasdaq100_<snapshot-date>.csv`
   (see research.md §2 for how it was captured).
@@ -29,7 +29,7 @@ podman compose up -d db
 
 # DATABASE_URL points at the compose service via the container-to-host bridge:
 export DATABASE_URL="postgresql://market_anomaly_agent:<password>@host.containers.internal:5432/market_anomaly_agent"
-export PRICE_DATA_API_KEY="<your FMP API key>"
+export PRICE_DATA_API_KEY="<your Twelve Data API key>"
 
 uv run python -m market_anomaly_agent.storage.migrate   # applies storage/migrations/*.sql in order
 ```

@@ -2,7 +2,7 @@
 
 **Feature**: [../spec.md](../spec.md) | **Research**: [../research.md](../research.md)
 
-The vendor-specific HTTP details (FMP today — research.md §1) MUST stay behind this interface, so
+The vendor-specific HTTP details (Twelve Data today — research.md §1) MUST stay behind this interface, so
 the vendor can be swapped later without touching `calc/`, `detection.py`, or storage code.
 
 ## Shape (illustrative — not literal code)
@@ -10,9 +10,8 @@ the vendor can be swapped later without touching `calc/`, `detection.py`, or sto
 ```
 class DailyBar:
     trading_date: date
-    open: Decimal
-    close: Decimal       # split-adjusted
-    adjusted_close: Decimal  # split- and dividend-adjusted (FR-004/FR-005 use this one)
+    open: Decimal        # split- and dividend-adjusted (FR-004)
+    close: Decimal       # split- and dividend-adjusted (FR-004; FR-005 computes returns from this)
     volume: int
 
 class PriceDataSource(Protocol):
@@ -35,6 +34,9 @@ class PriceDataSource(Protocol):
 
 ## Implementations
 
-- `FmpPriceDataSource` — the production adapter, documented in research.md §1 and §6.
+- `TwelveDataPriceDataSource` — the production adapter, documented in research.md §1 and §6. It
+  calls `/time_series` with `interval=1day`, `adjust=all` (the API default is `splits`, which
+  would leave dividends unadjusted) and `start_date`/`end_date`, so one request per ticker covers
+  the whole range.
 - A test double (fixed, hand-built `DailyBar` lists) is used for every unit test; no test ever
   calls the real adapter or makes a network request (constitution Principle VIII).
