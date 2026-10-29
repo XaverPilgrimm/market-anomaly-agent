@@ -115,8 +115,13 @@ history, and every other stock is evaluated normally.
   hours, so the transition does not shift which calendar day is evaluated.
 - A split or dividend on or before the evaluated day: adjusted price data prevents the resulting
   price jump from being mistaken for an anomaly.
-- The benchmark's own data is missing or unusable for the evaluated day: the entire day's detection
-  is skipped and logged, since no stock's move can be judged without the benchmark.
+- The benchmark's own data is missing or unusable for the evaluated day: the run fails with a
+  non-zero exit code and stores nothing for that day, since no stock's move can be judged without
+  the benchmark. Because nothing is stored, the same day can simply be run again once the data is
+  available (a stored day-level skip could never be redone under FR-018).
+- More than 20% of the universe ends up skipped for missing data in one run: the run fails with a
+  non-zero exit code and stores nothing, since gaps on that scale point to a vendor outage or a
+  bug rather than real gaps in individual stocks' histories.
 - An exact tie in absolute z-score at the 10th/11th rank: ties are broken by ordering the tied
   stocks alphabetically by ticker, so the kept set of 10 is always reproducible.
 - More than 10 stocks qualify on one day: only the top 10 by absolute z-score (after tie-breaking)
@@ -208,6 +213,13 @@ history, and every other stock is evaluated normally.
 - **FR-021**: Each detection run MUST take exactly one explicit evaluated trading day as input.
   Processing multiple missed evaluated days MUST be achieved by invoking the run once per missed
   day; a single run MUST NOT process a range of days on its own.
+- **FR-022**: When the benchmark has no usable data for the evaluated day (no data at all, or no
+  close for the evaluated day or for the previous trading day), the run MUST fail with a non-zero
+  exit code, log the reason, and store nothing for that day, so the day can be run again later.
+- **FR-023**: When more than 20% of the universe's stocks would be skipped for missing data
+  (FR-012's missing-data reason, not insufficient history) in one run, the run MUST fail with a
+  non-zero exit code, log the count, and store nothing for that day. Exactly 20% does not fail
+  the run.
 
 ### Key Entities
 

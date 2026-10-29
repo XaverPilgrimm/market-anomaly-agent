@@ -19,17 +19,25 @@ class PriceDataSource(Protocol):
         self, ticker: str, start: date, end: date
     ) -> list[DailyBar]:
         """Return adjusted daily bars for `ticker` between `start` and `end`, inclusive,
-        for trading days only. Raises PriceDataUnavailable if the vendor has no data for
-        `ticker` at all; returns a (possibly shorter) list, never raises, when some days
+        for trading days only. Raises PriceDataUnavailable if the vendor reports no
+        matching data for `ticker`, and PriceDataError for any other failure; returns a (possibly shorter) list, never raises, when some days
         within the range are simply missing — callers decide what a gap means (FR-012)."""
 ```
 
 ## Error semantics
 
-- A ticker the vendor has never heard of → `PriceDataUnavailable` (caller treats as "missing
-  data," FR-012).
+- The vendor reports that it has no matching data for the ticker → `PriceDataUnavailable`
+  (caller treats as "missing data," FR-012). For Twelve Data this is error code `404` only.
+- The vendor rejects the request itself (for Twelve Data, error code `400`: an invalid or malformed
+  parameter) → `PriceDataError`, never `PriceDataUnavailable`, so a parameter bug fails the run
+  loudly instead of looking like missing data.
+- Any other non-retryable vendor error (for example an invalid API key) or a malformed response
+  → `PriceDataError`.
 - A transient failure (timeout, HTTP 5xx, HTTP 429) → the adapter retries with backoff internally,
-  within the run's overall budget; it only raises to the caller once retries are exhausted.
+  within the run's overall budget; it only raises `PriceDataError` to the caller once retries are
+  exhausted.
+- The caller treats `PriceDataError` for any ticker as a failed run (CLI exit `1`), not as a
+  skipped stock.
 - The adapter never silently fabricates a bar for a day it has no data for.
 
 ## Implementations

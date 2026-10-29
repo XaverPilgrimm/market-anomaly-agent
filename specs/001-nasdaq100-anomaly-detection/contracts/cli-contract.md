@@ -28,10 +28,11 @@ Principle IV).
 
 | Code | Meaning |
 |---|---|
-| `0` | Run completed: either a fresh evaluation was stored, the day's result was already stored and this run reproduced it (same input data — FR-018), or the day was stored as a clean day-level skip (`status = 'skipped_benchmark_unavailable'`) |
-| `1` | Unexpected error (network failure after retries, database unavailable, programming error) |
+| `0` | Run completed: either a fresh evaluation was stored, or the day's result was already stored and this run reproduced it (same input data — FR-018) |
+| `1` | Unexpected error (network failure after retries, a vendor error other than "no matching data", database unavailable, programming error). Nothing is written. |
 | `2` | Usage error: `--date` missing/malformed, or `--date` is not a trading day per the US market calendar |
 | `3` | Reject: the day was already evaluated, and the freshly fetched price data does not match the bar snapshot stored by that day's original run (FR-018). Nothing is written. |
+| `4` | Input data unusable for this day: the benchmark has no usable data (FR-022), or more than 20% of the universe would be skipped for missing data (FR-023). Nothing is written; the same command can be run again later. |
 
 ## Stdout contract
 

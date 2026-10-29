@@ -74,15 +74,14 @@ One row per evaluated trading day (FR-021: exactly one explicit day per run).
 | `detection_rule_version` | `TEXT NOT NULL` | version of the flagging/cap/window rules (FR-014) |
 | `computed_at` | `TIMESTAMPTZ NOT NULL` | when the computation was performed (FR-014) |
 | `benchmark_ticker` | `TEXT NOT NULL` | which instrument served as the benchmark |
-| `benchmark_return` | `NUMERIC NULL` | the benchmark's own return for the day (FR-015); `NULL` only when `status <> 'completed'` |
-| `status` | `TEXT NOT NULL` | `'completed'` or `'skipped_benchmark_unavailable'` — the day-level outcome (see Edge Cases: benchmark data missing) |
-| `status_detail` | `TEXT NULL` | reason text when `status <> 'completed'` |
+| `benchmark_return` | `NUMERIC NOT NULL` | the benchmark's own return for the day (FR-015) |
 
 **State transitions**: a `detection_runs` row is written exactly once per `evaluated_date` and
-never updated afterward (FR-018). There is no "superseding" or "revision" state — the clarified
-rule is reject-and-store-nothing on a data mismatch, so every row that exists reflects a run that
-either completed or cleanly recorded a day-level skip; a rejected re-run leaves no trace in this
-table (it fails before any write).
+never updated afterward (FR-018). There is no "superseding", "revision" or day-level "skipped"
+state: every row that exists reflects a completed run. A run that fails — because its re-run data
+does not match the stored snapshot (FR-018), the benchmark has no usable data (FR-022), or more
+than 20% of the universe is missing data (FR-023) — fails before any write and leaves no trace in
+any table, so the day can be run again later.
 
 ## `evaluated_stock_records`
 

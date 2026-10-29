@@ -74,6 +74,19 @@ uv run python -m market_anomaly_agent.storage.migrate   # applies storage/migrat
    and every other eligible ticker to appear in either `evaluated_stock_records` or
    `anomaly_cases` as appropriate.
 
+## Validation scenario 5 — unusable input fails and stores nothing (FR-022, FR-023)
+
+These cannot be provoked on demand against the live vendor, so they are checked with a fake
+price source in `tests/integration/test_detect_end_to_end.py`:
+
+1. Benchmark (`QQQ`) has no bar on the evaluated day → exit code `4`, and
+   `SELECT count(*) FROM detection_runs WHERE evaluated_date = '<day>'` is `0`, with no rows for
+   that day in any other table either.
+2. 21 of 100 universe tickers have no bar on the evaluated day → exit code `4`, nothing stored.
+   With exactly 20 missing, the run completes (exit `0`) and stores those 20 as `missing_data`.
+3. After either failure, running the same day again with complete data exits `0` and stores the
+   day normally.
+
 ## Running the test suite
 
 ```bash
