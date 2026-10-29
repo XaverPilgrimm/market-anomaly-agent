@@ -31,7 +31,7 @@ Principle IV).
 | `0` | Run completed: either a fresh evaluation was stored, the day's result was already stored and this run reproduced it (same input data — FR-018), or the day was stored as a clean day-level skip (`status = 'skipped_benchmark_unavailable'`) |
 | `1` | Unexpected error (network failure after retries, database unavailable, programming error) |
 | `2` | Usage error: `--date` missing/malformed, or `--date` is not a trading day per the US market calendar |
-| `3` | Reject: the day was already evaluated, and the freshly fetched price data for the overlapping date range does not match what is already stored for it (FR-018). Nothing is written. |
+| `3` | Reject: the day was already evaluated, and the freshly fetched price data does not match the bar snapshot stored by that day's original run (FR-018). Nothing is written. |
 
 ## Stdout contract
 
@@ -41,6 +41,10 @@ as whitespace-separated `key=value` pairs, e.g.:
 ```
 evaluated_date=2026-10-27 status=completed flagged=7 evaluated=94 skipped=7 rule_version=1
 ```
+
+`evaluated` counts `evaluated_stock_records` rows and `skipped` counts `skipped_stock_records`
+rows for the day. A stock that qualified but was dropped by the daily cap has both rows, so it is
+counted in both, and `evaluated + skipped` can exceed the universe size.
 
 Human-readable detail (per-ticker breakdown, timing) may precede that line but the last line is
 always this summary, so scripts can reliably read it with `tail -1`.

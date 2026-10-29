@@ -1,0 +1,5 @@
+{
+  "env": {
+    "UV_PROJECT_ENVIRONMENT": "/home/dev/.venvs/market-anomaly-agent"
+  }
+}

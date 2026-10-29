@@ -58,8 +58,9 @@ uv run python -m market_anomaly_agent.storage.migrate   # applies storage/migrat
 
 ## Validation scenario 3 — reject on changed input data (FR-018, Clarifications Q1)
 
-1. Manually alter one stored `daily_price_bars` row for that date (simulating a vendor
-   correction that happened after the original run).
+1. Manually alter one `daily_price_bars` row of that run's stored snapshot
+   (`evaluated_date = '2026-10-27'`), simulating a vendor correction that happened after the
+   original run.
 2. Run `uv run detect --date 2026-10-27` again.
 3. Expect exit code `3`, no change to the altered row, and no new/changed row in any other table
    for that date.

@@ -1,0 +1,42 @@
+[project]
+name = "market-anomaly-agent"
+version = "0.1.0"
+description = "Daily Nasdaq-100 anomaly detection. Experimental research project, not investment advice."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.4",
+    "pandas-market-calendars>=5.5.0",
+    "psycopg[binary]>=3.3.6",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+detect = "market_anomaly_agent.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a local PostgreSQL"]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["pandas_market_calendars", "pandas_market_calendars.*"]
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+    "types-requests>=2.33.0.20261006",
+]

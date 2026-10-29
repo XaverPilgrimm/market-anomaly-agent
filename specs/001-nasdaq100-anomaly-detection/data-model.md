@@ -11,7 +11,7 @@ PostgreSQL tables (plain SQL, no ORM — see research.md §5). Monetary/statisti
 | Entity (spec) | Table | Primary key |
 |---|---|---|
 | Universe Constituent | `universe_constituents` | `ticker` |
-| Daily Price Bar | `daily_price_bars` | `(ticker, trading_date)` |
+| Daily Price Bar | `daily_price_bars` | `(evaluated_date, ticker, trading_date)` |
 | Detection Run | `detection_runs` | `evaluated_date` |
 | Evaluated Stock Record | `evaluated_stock_records` | `(evaluated_date, ticker)` |
 | Anomaly Case | `anomaly_cases` | `(evaluated_date, ticker)` |
@@ -37,12 +37,19 @@ so the application can mutate it.
 
 ## `daily_price_bars`
 
-Every adjusted daily bar a run has ever fetched and used, for universe stocks and the benchmark
-alike (FR-004, and the technical-context requirement to store the bars each run used so re-runs
-are reproducible). Append-only.
+A snapshot of the exact adjusted bars each run fetched and used, for universe stocks and the
+benchmark alike (FR-004, and the technical-context requirement to store the bars each run used so
+re-runs are reproducible). Append-only.
+
+Bars are stored **per run**, not once per `(ticker, trading_date)`. Split- and dividend-adjusted
+prices are restated for every earlier day whenever a stock goes ex-dividend or splits, so the same
+`(ticker, trading_date)` legitimately has different adjusted values in runs made on different days.
+Each run therefore computes only from its own fresh fetch and stores that whole window under its
+`evaluated_date`; it never reads or compares bars stored by a run for a different evaluated day.
 
 | Column | Type | Notes |
 |---|---|---|
+| `evaluated_date` | `DATE NOT NULL REFERENCES detection_runs(evaluated_date)` | the run whose input snapshot this bar belongs to |
 | `ticker` | `TEXT NOT NULL` | a universe ticker or the configured benchmark ticker; no FK to `universe_constituents` so the benchmark row needs no universe entry |
 | `trading_date` | `DATE NOT NULL` | |
 | `open` | `NUMERIC NOT NULL` | adjusted for splits and dividends (FR-004) |
@@ -51,10 +58,11 @@ are reproducible). Append-only.
 | `source` | `TEXT NOT NULL` | price-data vendor identifier, for provenance |
 | `fetched_at` | `TIMESTAMPTZ NOT NULL` | when this bar was retrieved |
 
-**Primary key**: `(ticker, trading_date)`. **Validation rule**: once a `(ticker, trading_date)`
-row exists, it is never updated — this is what makes the FR-018 reject-on-mismatch check possible
-(a fresh fetch is compared value-for-value against any existing row for the same key before a run
-is allowed to proceed).
+**Primary key**: `(evaluated_date, ticker, trading_date)`. **Validation rule**: rows are never
+updated or deleted — this is what makes the FR-018 reject-on-mismatch check possible: when a run
+for an `evaluated_date` that already has a `detection_runs` row is started, its fresh fetch is
+compared value-for-value (`open`, `close`, `volume`, and the set of `(ticker, trading_date)` keys)
+against that `evaluated_date`'s stored snapshot before anything is written.
 
 ## `detection_runs`
 
@@ -78,8 +86,10 @@ table (it fails before any write).
 
 ## `evaluated_stock_records`
 
-One row per stock that had enough history and data to be evaluated on a given day — flagged or
-not (FR-014, Clarifications Q1 of the spec's acceptance scenarios).
+One row per stock that had enough history and data to be evaluated on a given day — flagged,
+not qualifying, or qualifying but dropped by the daily cap (FR-014: "for every evaluated stock
+whether flagged or not"). A cap-exceeded stock was fully evaluated, so it gets this row with all
+its numbers **and** a `cap_exceeded` row in `skipped_stock_records`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -118,26 +128,46 @@ check constraint).
 ## `skipped_stock_records`
 
 A stock that was not evaluated at all, or that qualified but lost out to the cap, for a given day
-(FR-012, FR-010, FR-017). Per the Key Entities clarification: a stock that was evaluated but
-simply did not qualify is **not** stored here — it is an `evaluated_stock_records` row.
+(FR-012, FR-010, FR-017). The two kinds differ:
+
+- `insufficient_history` / `missing_data`: the stock was not evaluated, so it has **no**
+  `evaluated_stock_records` row for that day.
+- `cap_exceeded`: the stock was evaluated and qualified (|z| ≥ 2) but ranked below 10th, so it
+  **also** has an `evaluated_stock_records` row with all its numbers (FR-014), and no
+  `anomaly_cases` row.
+
+Per the Key Entities clarification: a stock that was evaluated but simply did not qualify is
+**not** stored here — it is only an `evaluated_stock_records` row.
 
 | Column | Type | Notes |
 |---|---|---|
 | `evaluated_date` | `DATE NOT NULL` | |
 | `ticker` | `TEXT NOT NULL` | |
 | `reason_code` | `TEXT NOT NULL` | one of `insufficient_history`, `missing_data`, `cap_exceeded` |
-| `reason_detail` | `TEXT NULL` | free-text elaboration, e.g. the exact history length found |
+| `reason_detail` | `TEXT NULL` | free-text elaboration, e.g. the exact history length found, or for `cap_exceeded` the rank, e.g. `"rank 11 of 14 qualifying"` |
 
-**Primary key**: `(evaluated_date, ticker)`.
+**Primary key**: `(evaluated_date, ticker)`. **Validation rule**: a `cap_exceeded` row requires a
+matching `evaluated_stock_records` row with `abs(z_score) >= 2`; an `insufficient_history` or
+`missing_data` row requires that no such row exists (enforced by the application before insert,
+since a foreign key cannot depend on `reason_code`).
 
 ## Cross-entity invariants (from the spec's Functional Requirements)
 
-- A `(evaluated_date, ticker)` pair appears in **exactly one** of `evaluated_stock_records` or
-  `skipped_stock_records`, never both, and never neither (every universe ticker lands in one of
-  the two for every completed run) — this is the FR-012/FR-014 partition.
-- Every row in `anomaly_cases` has a matching row in `evaluated_stock_records` with the same key.
+- For every completed run, every universe ticker has exactly one of these outcomes:
+  - evaluated, not qualifying: an `evaluated_stock_records` row only;
+  - flagged: an `evaluated_stock_records` row and an `anomaly_cases` row;
+  - cap-exceeded: an `evaluated_stock_records` row and a `skipped_stock_records` row with
+    `reason_code = 'cap_exceeded'`;
+  - not evaluated: a `skipped_stock_records` row with `reason_code` `insufficient_history` or
+    `missing_data`, and no `evaluated_stock_records` row.
+- Every row in `anomaly_cases` has a matching row in `evaluated_stock_records` with the same key,
+  and no matching `skipped_stock_records` row.
+- Every `evaluated_stock_records` row with `abs(z_score) >= 2` has exactly one of an
+  `anomaly_cases` row or a `cap_exceeded` skip; together these number at most 10 anomaly cases
+  plus all the rest as `cap_exceeded` (FR-010, SC-004).
 - `detection_runs` rows are immutable once written; FR-018's reject path never produces a second
   row for the same `evaluated_date`, and never rewrites an existing one.
 - `daily_price_bars` rows are immutable once written; this is what lets the application detect,
-  before writing anything else, whether a re-run's freshly fetched bars match what a prior run
-  already stored for the same `(ticker, trading_date)` keys.
+  before writing anything else, whether a re-run's freshly fetched bars match the snapshot the
+  prior run for the same `evaluated_date` stored. Runs for different evaluated days never compare
+  against each other's snapshots.
