@@ -5,6 +5,8 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 
+from market_anomaly_agent.storage.migrate import apply_migrations
+
 
 @pytest.fixture
 def db_conn() -> Iterator[psycopg.Connection[tuple[object, ...]]]:
@@ -20,3 +22,12 @@ def db_conn() -> Iterator[psycopg.Connection[tuple[object, ...]]]:
             yield conn
         finally:
             conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+
+
+@pytest.fixture
+def migrated_conn(
+    db_conn: psycopg.Connection[tuple[object, ...]],
+) -> psycopg.Connection[tuple[object, ...]]:
+    """`db_conn` with every migration applied."""
+    apply_migrations(db_conn)
+    return db_conn
