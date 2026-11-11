@@ -277,7 +277,7 @@ unchanged: its last line is still the key=value summary (contracts/cli-contract.
 - [X] T042 [P] Run `uv run ruff check .`, `uv run ruff format --check .` and `uv run mypy` and fix every finding in `src/` and `tests/` (plan.md Testing; constitution Principle VIII type hints)
 - [X] T043 [P] Add a test in `tests/unit/test_no_network.py` that sets an autouse fixture in `tests/conftest.py` replacing `socket.socket.connect` with a function that raises, so any unit test that tries to open a network connection fails (constitution Principle VIII: the test suite MUST NOT make network calls); integration tests are allowed to reach only the local database, so the fixture skips tests marked `integration`
 - [X] T044 [P] Add `README.md` at the repository root with a short project description, the disclaimer "Experimental research project, not investment advice." (constitution Principle VI), and pointers to `specs/001-nasdaq100-anomaly-detection/quickstart.md` for setup and validation
-- [ ] T045 Run quickstart.md end to end against a real Twelve Data key and local PostgreSQL (scenarios 1–4, including the by-hand recomputation for one flagged ticker in scenario 1) and record the evaluated date, exit codes, run time (about 13 minutes expected) and the hand-check result in `specs/001-nasdaq100-anomaly-detection/checklists/quickstart-run.md`
+- [X] T045 Run quickstart.md end to end against a real Twelve Data key and local PostgreSQL (scenarios 1–4, including the by-hand recomputation for one flagged ticker in scenario 1) and record the evaluated date, exit codes, run time (about 13 minutes expected) and the hand-check result in `specs/001-nasdaq100-anomaly-detection/checklists/quickstart-run.md`
 
 ---
 
