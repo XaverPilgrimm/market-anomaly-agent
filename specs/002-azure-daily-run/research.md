@@ -418,8 +418,14 @@ not used.
 
 **Decision**: a two-stage `Containerfile` at the repository root.
 
-- Build stage: `ghcr.io/astral-sh/uv:<pinned>-python3.12-bookworm-slim`, then
-  `uv sync --frozen --no-dev --no-editable`.
+- Build stage: `python:3.12-slim-bookworm`, the same image as the runtime stage, so the venv's
+  interpreter path (`/usr/local/bin/python3.12`) is identical in both. uv is added as uv's Docker
+  guide recommends, `COPY --from=ghcr.io/astral-sh/uv:<pinned> /uv /uvx /bin/` (now `0.12.19`, the
+  release in use). Then `uv sync --frozen --no-dev --no-editable` with system Python only
+  (`UV_PYTHON_DOWNLOADS=never`, `UV_PYTHON_PREFERENCE=only-system`).
+- Rejected: the combined tag `ghcr.io/astral-sh/uv:0.12.19-python3.12-bookworm-slim`. It does not
+  exist ("manifest unknown" on the first host build, 2026-11-11), and a uv-provided Python base
+  could differ from the runtime image's interpreter path.
 - Runtime stage: `python:3.12-slim-bookworm` with `ca-certificates`, running as a non-root user.
   `ENTRYPOINT ["detect"]`; the job passes `--latest --migrate` as its arguments.
 - `.containerignore` excludes `.env`, `.git`, `specs/`, `tests/` and caches (FR-005).

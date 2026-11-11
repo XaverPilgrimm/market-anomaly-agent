@@ -61,3 +61,19 @@ jobs:
 
       - name: Bicep build (offline, no Azure sign-in)
         run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      # Image build without push or registry login (tasks.md T007). The build also runs the
+      # Containerfile's CA guard (research R8).
+      - name: Build image (no push)
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: docker build --build-arg GIT_SHA="$GIT_SHA" -f Containerfile -t market-anomaly-agent:ci .
+
+      - name: Smoke-test image (usage line must offer --latest)
+        run: |
+          help="$(docker run --rm market-anomaly-agent:ci --help)"
+          printf '%s\n' "$help"
+          if ! grep -E '^usage: detect .*--latest' <<<"$help" > /dev/null; then
+            echo "the image's usage line lacks --latest" >&2
+            exit 1
+          fi

@@ -42,7 +42,8 @@ for infrastructure; Bash for the host-side operation scripts
 - Existing: `numpy`, `pandas-market-calendars`, `psycopg[binary]`, `requests`.
 - **New**: `azure-identity`, for the managed-identity token in `DATABASE_AUTH=entra` mode
   (research R11).
-- Build and run: `ghcr.io/astral-sh/uv` builder image, `python:3.12-slim-bookworm` runtime.
+- Build and run: `python:3.12-slim-bookworm` for both stages, with uv copied into the build stage
+  from `ghcr.io/astral-sh/uv:0.12.19` (`COPY --from=… /uv /uvx /bin/`, research R12).
 - Azure resource API versions are pinned in Bicep, `Microsoft.App/jobs@2026-07-01` (latest listed; GA).
 
 **Storage**: Azure Database for PostgreSQL Flexible Server, PostgreSQL 17, `Standard_B1ms`,

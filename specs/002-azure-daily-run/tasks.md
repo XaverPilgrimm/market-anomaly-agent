@@ -118,6 +118,11 @@ script, and the CI checks every later change is validated by
 
   This covers FR-007 for pull requests and pushes.
 
+  *Extended after T016:* two more steps at the end of `checks`, on every pull request and push, with no push and no registry login:
+    6. `docker build --build-arg GIT_SHA="$GIT_SHA" -f Containerfile -t market-anomaly-agent:ci .`, with `GIT_SHA: ${{ github.sha }}` passed through `env:`. This also runs the Containerfile's CA guard (research R8).
+    7. `docker run --rm market-anomaly-agent:ci --help`, failing the job unless the output has a line matching `^usage: detect .*--latest`.
+    The build pulls `python:3.12-slim-bookworm` and `ghcr.io/astral-sh/uv:0.12.19` (uv binaries only, copied in by T016's build stage). Both are public, so the step still needs no registry login. A missing or mistyped base tag fails this step on the pull request, before anything reaches `main`.
+
 **Checkpoint**: Bicep compiles, CI runs every check on pull requests, scripts refuse to run in the
 agent container.
 
@@ -185,8 +190,8 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - `_secrets()` also returns every value of `db.issued_tokens()`.
   - Update the module docstring to name both modes. Exit codes are unchanged.
 - [X] T015 [US1] Run `uv run pytest`, `uv run pytest -m integration` (local PostgreSQL via `podman compose`, as in feature 001), `uv run ruff check`, `uv run ruff format --check` and `uv run mypy`. Everything must pass, T011 included. Fix failures in the files of T012 to T014 only.
-- [ ] T016 [P] [US1] Create `Containerfile` per research R12:
-  - Stage `build` from `ghcr.io/astral-sh/uv:<version>-python3.12-bookworm-slim`, with `<version>` the exact uv release in use (`uv --version`, at least two weeks old). `WORKDIR /app`, copy `pyproject.toml`, `uv.lock`, `README.md` and `src/`, then `uv sync --frozen --no-dev --no-editable`.
+- [X] T016 [P] [US1] Create `Containerfile` per research R12:
+  - Stage `build` from `python:3.12-slim-bookworm`, the same image as the runtime stage, so the venv's interpreter path (`/usr/local/bin/python3.12`) matches. Add uv as uv's Docker guide recommends: `COPY --from=ghcr.io/astral-sh/uv:<version> /uv /uvx /bin/`, with `<version>` the exact uv release in use (`uv --version`, at least two weeks old; now `0.12.19`). *Corrected after the first host build:* the combined tag `ghcr.io/astral-sh/uv:0.12.19-python3.12-bookworm-slim` does not exist ("manifest unknown"), while `ghcr.io/astral-sh/uv:0.12.19` does. `WORKDIR /app`, copy `pyproject.toml`, `uv.lock`, `README.md` and `src/`, then `uv sync --frozen --no-dev --no-editable`.
   - Stage `runtime` from `python:3.12-slim-bookworm`: `apt-get install --no-install-recommends ca-certificates` and clean the apt lists, create user `app` (uid 10001), copy `/app/.venv` from `build`, and set `PATH=/app/.venv/bin:$PATH`.
   - CA guard (research R8): right after installing `ca-certificates`, a `RUN` step fails the build unless `/etc/ssl/certs/ca-certificates.crt` contains both roots Microsoft documents for Azure Database for PostgreSQL: `python -c "import ssl; s={dict(x[0] for x in c['subject']).get('commonName') for c in ssl.create_default_context(cafile='/etc/ssl/certs/ca-certificates.crt').get_ca_certs()}; missing={'DigiCert Global Root G2','Microsoft RSA Root Certificate Authority 2017'}-s; assert not missing, missing"`. Do not set `PGSSLROOTCERT`, `SSL_CERT_FILE` or `SSL_CERT_DIR`: the job's `DATABASE_URL` names the file (`sslrootcert=/etc/ssl/certs/ca-certificates.crt`, T018), because `sslrootcert=system` does not find a store with the wheel's bundled OpenSSL.
   - `ARG GIT_SHA=unknown`, `ENV APP_COMMIT=$GIT_SHA`, and `LABEL org.opencontainers.image.revision=$GIT_SHA` and `org.opencontainers.image.source=https://github.com/XaverPilgrimm/market-anomaly-agent`.
