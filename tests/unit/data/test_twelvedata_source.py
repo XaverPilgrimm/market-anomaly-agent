@@ -63,8 +63,24 @@ class FakeSession:
         return outcome
 
 
-def ok_response(values: list[dict[str, str]]) -> FakeResponse:
-    return FakeResponse(200, {"status": "ok", "meta": {}, "values": values})
+NASDAQ_META = {
+    "symbol": "AAPL",
+    "interval": "1day",
+    "currency": "USD",
+    "exchange_timezone": "America/New_York",
+    "exchange": "NASDAQ",
+    "mic_code": "XNGS",
+    "type": "Common Stock",
+}
+
+
+def ok_response(
+    values: list[dict[str, str]], meta: dict[str, str] | None = NASDAQ_META
+) -> FakeResponse:
+    body: dict[str, Any] = {"status": "ok", "values": values}
+    if meta is not None:
+        body["meta"] = meta
+    return FakeResponse(200, body)
 
 
 def bar_json(day: str, open_: str = "101.25", close: str = "102.50") -> dict[str, str]:
@@ -103,6 +119,7 @@ def test_request_parameters_and_auth_header() -> None:
         "order": "asc",
         "timezone": "America/New_York",
         "outputsize": "5000",
+        "exchange": "NASDAQ",
     }
     assert call["headers"] == {"Authorization": f"apikey {API_KEY}"}
     assert API_KEY not in call["url"]
@@ -136,6 +153,50 @@ def test_drops_bars_outside_range_and_sorts_ascending() -> None:
     bars = source.get_daily_bars("AAPL", date(2026, 10, 23), date(2026, 10, 27))
 
     assert [b.trading_date for b in bars] == [date(2026, 10, 23), date(2026, 10, 27)]
+
+
+def without(key: str) -> dict[str, str]:
+    return {k: v for k, v in NASDAQ_META.items() if k != key}
+
+
+@pytest.mark.parametrize(
+    "meta, got",
+    [
+        ({**NASDAQ_META, "exchange": "NYSE", "mic_code": "XNYS"}, "exchange NYSE and currency USD"),
+        ({**NASDAQ_META, "exchange": "XETR", "currency": "EUR"}, "exchange XETR and currency EUR"),
+        ({**NASDAQ_META, "currency": "EUR"}, "exchange NASDAQ and currency EUR"),
+        (without("exchange"), "exchange None and currency USD"),
+        (without("currency"), "exchange NASDAQ and currency None"),
+        (None, "exchange None and currency None"),
+    ],
+    ids=[
+        "other-exchange",
+        "foreign-listing",
+        "other-currency",
+        "no-exchange",
+        "no-currency",
+        "no-meta",
+    ],
+)
+def test_response_for_another_listing_raises_without_bars_or_retry(
+    meta: dict[str, str] | None, got: str
+) -> None:
+    source, session, _ = make_source([ok_response([bar_json("2026-10-27")], meta=meta)])
+
+    with pytest.raises(PriceDataError) as excinfo:
+        source.get_daily_bars("AAPL", date(2026, 10, 27), date(2026, 10, 27))
+
+    assert str(excinfo.value) == (f"AAPL: expected exchange NASDAQ and currency USD, got {got}")
+    assert len(session.calls) == 1
+
+
+def test_matching_meta_with_extra_fields_parses_bars() -> None:
+    meta = {**NASDAQ_META, "symbol": "QQQ", "mic_code": "XNMS", "type": "ETF"}
+    source, _, _ = make_source([ok_response([bar_json("2026-10-27")], meta=meta)])
+
+    bars = source.get_daily_bars("QQQ", date(2026, 10, 27), date(2026, 10, 27))
+
+    assert [b.trading_date for b in bars] == [date(2026, 10, 27)]
 
 
 def test_error_body_404_no_matching_data_raises_unavailable() -> None:

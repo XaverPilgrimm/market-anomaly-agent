@@ -91,7 +91,7 @@ migration runner. Every user story depends on these.
 ### Tests for Phase 2 (write first, see them fail)
 
 - [X] T006 [P] Write `tests/unit/test_calendar.py` for the NASDAQ calendar in `America/New_York` (FR-013): `is_trading_day` is false for a Saturday, for 2025-12-25 and for 2025-07-04, and true for 2025-11-28 (day after Thanksgiving, early close counts as a full trading day); `previous_trading_day(date(2025, 12, 26))` is 2025-12-24; `previous_trading_day(date(2026, 1, 2))` is 2025-12-31; `trading_days_before(date(2026, 3, 9), 5)` returns the 5 trading days before 2026-03-09 in ascending order and is unaffected by the 2026-03-08 DST change; `fetch_window_start(d)` returns the trading day 121 trading days before `d`
-- [X] T007 [P] Write `tests/unit/data/test_twelvedata_source.py` against `TwelveDataPriceDataSource` using an injected fake session (an object with a `get(url, params, headers, timeout)` method returning canned JSON) and an injected fake `sleep` that records calls (no real HTTP, no real waiting). Cover: request goes to `https://api.twelvedata.com/time_series` with params `symbol`, `interval=1day`, `adjust=all`, `start_date`, `end_date` set to the day *after* the requested end, `order=asc`, `timezone=America/New_York`, and the API key in the `Authorization: apikey <key>` header, never in the URL or params; a canned `{"status": "ok", "values": [{"datetime": "2026-10-27", "open": "101.25", "high": "...", "low": "...", "close": "102.50", "volume": "1234567"}]}` becomes `DailyBar(trading_date=date(2026, 10, 27), open=Decimal("101.25"), close=Decimal("102.50"), volume=1234567)`; bars outside `[start, end]` are dropped; a body with `"status": "error"` and `code` 400 or 404 raises `PriceDataUnavailable` (superseded by T046: only 404 does, 400 raises `PriceDataError`); HTTP 429, HTTP 5xx, a `"code": 429` error body and a timeout are retried (at most 3 retries, waiting 60 s on 429 and 2/4/8 s otherwise) and raise `PriceDataError` once retries are exhausted; consecutive requests are spaced at least 7.5 s apart (8 per minute); the 801st request in one adapter instance raises `PriceDataError` without calling the session (800 per day); the API key never appears in any raised exception message or log record (use `caplog`)
+- [X] T007 [P] Write `tests/unit/data/test_twelvedata_source.py` against `TwelveDataPriceDataSource` using an injected fake session (an object with a `get(url, params, headers, timeout)` method returning canned JSON) and an injected fake `sleep` that records calls (no real HTTP, no real waiting). Cover: request goes to `https://api.twelvedata.com/time_series` with params `symbol`, `interval=1day`, `adjust=all`, `start_date`, `end_date` set to the day *after* the requested end, `order=asc`, `timezone=America/New_York`, and the API key in the `Authorization: apikey <key>` header, never in the URL or params; a canned `{"status": "ok", "values": [{"datetime": "2026-10-27", "open": "101.25", "high": "...", "low": "...", "close": "102.50", "volume": "1234567"}]}` becomes `DailyBar(trading_date=date(2026, 10, 27), open=Decimal("101.25"), close=Decimal("102.50"), volume=1234567)`; bars outside `[start, end]` are dropped; a body with `"status": "error"` and `code` 400 or 404 raises `PriceDataUnavailable` (superseded by T046: only 404 does, 400 raises `PriceDataError`); (request params and `meta` checks extended by T051); HTTP 429, HTTP 5xx, a `"code": 429` error body and a timeout are retried (at most 3 retries, waiting 60 s on 429 and 2/4/8 s otherwise) and raise `PriceDataError` once retries are exhausted; consecutive requests are spaced at least 7.5 s apart (8 per minute); the 801st request in one adapter instance raises `PriceDataError` without calling the session (800 per day); the API key never appears in any raised exception message or log record (use `caplog`)
 - [X] T008 [P] Write `tests/unit/universe/test_constituents.py` for `read_universe_file(path)`: a fixture CSV with header `ticker,company_name,snapshot_date,source,share_class_note` parses into a tuple of `UniverseConstituent` (fields matching the header, `snapshot_date` as `date`, empty `share_class_note` as `None`) sorted by ticker; a missing column or an unparseable date raises `UniverseFileError`; `find_universe_file(directory)` returns the single `nasdaq100_*.csv` file and raises `UniverseFileError` when there are zero or more than one
 - [X] T009 [P] Write `tests/integration/test_storage.py::test_migrations_apply_once` (mark `@pytest.mark.integration`, uses `DATABASE_URL`, creates and drops a throwaway schema per test): running the migration runner twice applies `0001_init.sql` exactly once, records it in `schema_migrations`, and creates the six tables from data-model.md with their primary keys
 
@@ -99,7 +99,7 @@ migration runner. Every user story depends on these.
 
 - [X] T010 [P] Implement `src/market_anomaly_agent/calendar.py` (pass T006) using `pandas_market_calendars.get_calendar("NASDAQ")` and `America/New_York`: `is_trading_day(d: date) -> bool`, `previous_trading_day(d: date) -> date`, `trading_days_before(d: date, n: int) -> list[date]` (ascending, excludes `d`), `trading_days_between(start: date, end: date) -> list[date]` (inclusive), `fetch_window_start(d: date) -> date` (121 trading days before `d`). All take and return plain `date`s; early-close sessions are ordinary trading days
 - [X] T011 [P] Implement `src/market_anomaly_agent/data/source.py` exactly as contracts/price-data-source-interface.md: frozen dataclass `DailyBar(trading_date: date, open: Decimal, close: Decimal, volume: int)` (open and close split- and dividend-adjusted), `PriceDataSource` `Protocol` with `get_daily_bars(self, ticker: str, start: date, end: date) -> list[DailyBar]`, exceptions `PriceDataUnavailable` (vendor has no data for the ticker at all) and `PriceDataError` (retries or request budget exhausted)
-- [X] T012 Implement `src/market_anomaly_agent/data/twelvedata_source.py` (pass T007; depends on T011): class `TwelveDataPriceDataSource(api_key: str, session: requests.Session | None = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic)` implementing `PriceDataSource` per contracts/price-data-source-interface.md and research.md §1/§6 — sequential requests, minimum 7.5 s between requests, hard stop at 800 requests per instance, retries and waits as specified in T007, `timeout=30` per request, results sorted by `trading_date` and filtered to `[start, end]`. Pass `end_date` as the day after `end` so the end day is included whether or not the API treats `end_date` as exclusive. Never fabricate a bar; never log or include the API key in messages (vendor error 400 handling corrected by T048)
+- [X] T012 Implement `src/market_anomaly_agent/data/twelvedata_source.py` (pass T007; depends on T011): class `TwelveDataPriceDataSource(api_key: str, session: requests.Session | None = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic)` implementing `PriceDataSource` per contracts/price-data-source-interface.md and research.md §1/§6 — sequential requests, minimum 7.5 s between requests, hard stop at 800 requests per instance, retries and waits as specified in T007, `timeout=30` per request, results sorted by `trading_date` and filtered to `[start, end]`. Pass `end_date` as the day after `end` so the end day is included whether or not the API treats `end_date` as exclusive. Never fabricate a bar; never log or include the API key in messages (vendor error 400 handling corrected by T048) (exchange pinning and `meta` check added by T052)
 - [X] T013 [P] Implement `src/market_anomaly_agent/universe/constituents.py` reader part (pass T008): frozen dataclass `UniverseConstituent(ticker: str, company_name: str, snapshot_date: date, source: str, share_class_note: str | None)`, `UniverseFileError`, `find_universe_file(directory: Path) -> Path`, `read_universe_file(path: Path) -> tuple[UniverseConstituent, ...]` using the standard-library `csv` module. Validation of the frozen-universe rules is added in US2 (T034)
 - [X] T014 Write `src/market_anomaly_agent/storage/migrations/0001_init.sql` creating the six tables exactly as data-model.md, including these constraints verbatim from it (the `detection_runs` columns `status` and `status_detail` and the nullable `benchmark_return` below are superseded by T049):
   `universe_constituents`: `ticker TEXT PRIMARY KEY`, `company_name TEXT NOT NULL`, `snapshot_date DATE NOT NULL`, `source TEXT NOT NULL`, `share_class_note TEXT NULL`.
@@ -138,6 +138,29 @@ adapter.
 - [X] T050 [P] Add `MAX_MISSING_DATA_PERCENT: Final = 20` to `src/market_anomaly_agent/rules.py`, after `MIN_VOLUME_DAYS`, with the comment `# more missing_data skips than this share of the universe -> fail the run (FR-023)`; `RULE_VERSION` stays `"1"` because no run has been stored yet
 
 **Checkpoint**: `uv run pytest` and `uv run pytest -m integration` pass with the corrected adapter and schema.
+
+---
+
+## Phase 2c: Exchange pinning for the price-data adapter
+
+**Purpose**: Twelve Data does not document how a ticker listed on several exchanges is resolved,
+so a request for `symbol` alone could return another listing's bars (contracts/price-data-source-interface.md,
+"Listing resolution"). Every Nasdaq-100 stock and the benchmark `QQQ` are Nasdaq-listed, so the
+adapter pins the exchange on every request and rejects any response whose `meta` names another
+listing. New IDs are appended (T051–T052) after Phase 2b.
+
+**⚠️ CRITICAL**: Complete before any run against the real vendor (T045). It changes only the
+adapter; `detection.py`, storage and the CLI are unaffected.
+
+### Tests for Phase 2c (write first, see them fail)
+
+- [X] T051 In `tests/unit/data/test_twelvedata_source.py`: `test_request_parameters_and_auth_header` also expects `exchange=NASDAQ` in the params; `ok_response` defaults to `meta = {"exchange": "NASDAQ", "currency": "USD", ...}`; with canned `meta` objects, a response whose `meta.exchange` is not `NASDAQ` (e.g. `NYSE`), whose `meta.currency` is not `USD` (e.g. `EUR`), that lacks `exchange` or `currency`, or that has no `meta` at all raises `PriceDataError` naming the ticker and the exchange and currency received, returns no bars, and is not retried (exactly one session call); a matching `meta` with bars still parses normally
+
+### Implementation for Phase 2c
+
+- [X] T052 In `src/market_anomaly_agent/data/twelvedata_source.py` (pass T051): add constants `EXCHANGE = "NASDAQ"` and `CURRENCY = "USD"`; send `exchange=EXCHANGE` with every `/time_series` request; on a `status` `ok` body, check `meta.exchange == EXCHANGE` and `meta.currency == CURRENCY` before parsing any bar, and otherwise raise `PriceDataError(f"{ticker}: expected exchange NASDAQ and currency USD, got exchange <exchange> and currency <currency>")` (missing values shown as `None`); the check is not retried
+
+**Checkpoint**: `uv run pytest` passes, including every existing adapter test.
 
 ---
 
@@ -254,6 +277,7 @@ has no bar on the evaluated day, and the rest are complete: the first and third 
 - **Setup (Phase 1)**: no dependencies.
 - **Foundational (Phase 2)**: depends on Setup; blocks all user stories.
 - **Foundational corrections (Phase 2b)**: depends on Phase 2; blocks all user stories (T027, T028 and T030 use the corrected schema and adapter).
+- **Exchange pinning (Phase 2c)**: depends on Phase 2b; touches only the adapter, so it does not block the user stories, but it MUST be done before T045 (the first run against the real vendor).
 - **US1 (Phase 3)**: depends on Foundational (Phases 2 and 2b) only.
 - **US2 (Phase 4)**: depends on Foundational; T034/T035 edit `cli.py` from T030, so do them after T030 if US1 and US2 run in parallel. T036 (manual capture) can be done at any time.
 - **US3 (Phase 5)**: depends on Foundational and on `detection.py` from T027, which it extends.
@@ -275,6 +299,7 @@ has no bar on the evaluated day, and the rest are complete: the first and third 
 - Phase 1: T003, T004, T005 together after T001/T002.
 - Phase 2: tests T006–T009 together; then T010, T011, T013 together; T012 after T011; T014 then T015.
 - Phase 2b: tests T046 and T047 together, with T050; then T048 and T049 together (different files).
+- Phase 2c: T051, then T052 (same adapter, test first).
 - US1: tests T016–T022 together; then T023–T026 together; then T027, T028 (different files) together; then T029, T030, T031 in order.
 - US2: T032 and T033 together; T036 any time.
 - US3: T038 and T039 touch the same test file, so write them one after the other.

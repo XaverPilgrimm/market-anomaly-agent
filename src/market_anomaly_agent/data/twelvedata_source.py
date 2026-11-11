@@ -26,6 +26,10 @@ RATE_LIMIT_WAIT_SECONDS = 60.0
 BACKOFF_SECONDS = (2.0, 4.0, 8.0)
 TIMEOUT_SECONDS = 30.0
 UNAVAILABLE_CODES = {404}  # no matching data; 400 (invalid parameter) must fail loudly
+# Every Nasdaq-100 stock and QQQ are Nasdaq-listed; pin the listing instead of relying on the
+# vendor's undocumented resolution of multi-listed symbols (contract, "Listing resolution").
+EXCHANGE = "NASDAQ"
+CURRENCY = "USD"
 
 
 class HttpResponse(Protocol):
@@ -79,6 +83,7 @@ class TwelveDataPriceDataSource:
             "order": "asc",
             "timezone": "America/New_York",
             "outputsize": "5000",
+            "exchange": EXCHANGE,
         }
         values = self._fetch(ticker, params)
         bars = [_parse_bar(ticker, v) for v in values]
@@ -137,6 +142,7 @@ class TwelveDataPriceDataSource:
                 raise PriceDataUnavailable(f"{ticker}: {message}")
             raise PriceDataError(f"{ticker}: vendor error {code}: {message}")
 
+        _check_listing(ticker, body.get("meta"))
         values = body.get("values")
         if not isinstance(values, list):
             raise PriceDataError(f"{ticker}: response has no 'values' list")
@@ -154,6 +160,18 @@ class TwelveDataPriceDataSource:
 
     def _scrub(self, text: str) -> str:
         return text.replace(self._api_key, "***") if self._api_key else text
+
+
+def _check_listing(ticker: str, meta: Any) -> None:
+    """Raise unless the response is for the Nasdaq listing in US dollars. Not retried: asking
+    again would get the same listing back."""
+    fields = meta if isinstance(meta, dict) else {}
+    exchange, currency = fields.get("exchange"), fields.get("currency")
+    if exchange != EXCHANGE or currency != CURRENCY:
+        raise PriceDataError(
+            f"{ticker}: expected exchange {EXCHANGE} and currency {CURRENCY}, "
+            f"got exchange {exchange} and currency {currency}"
+        )
 
 
 def _parse_bar(ticker: str, value: Any) -> DailyBar:
