@@ -34,7 +34,9 @@ place only when branching is genuinely unknown ahead of time.
 ### III. Research Integrity
 
 - The stock universe MUST be frozen at project start and MUST NOT be revised mid-project.
-  TODO(UNIVERSE_SNAPSHOT_DATE): record the snapshot date and commit the constituent list.
+  The frozen universe is the Nasdaq-100 as of 2026-11-11, taken from the Invesco QQQ Trust
+  holdings as of 2026-11-10 and committed as
+  `src/market_anomaly_agent/universe/nasdaq100_2026-11-11.csv`.
 - Every piece of evidence MUST carry a timestamp.
 - Only information published before or during a move MAY be used to explain that move. Later
   information MAY serve only as a pointer to an earlier cause, or as input to the trading
@@ -143,4 +145,4 @@ Compliance review: every pull request MUST be checked against these principles b
 Violations MUST be either fixed or recorded explicitly with a justification. Unresolved TODO
 placeholders in this document MUST be resolved before the first evaluation period begins.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-28 | **Last Amended**: 2026-10-28
+**Version**: 1.0.1 | **Ratified**: 2026-10-28 | **Last Amended**: 2026-11-11

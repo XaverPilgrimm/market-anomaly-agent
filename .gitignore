@@ -3,5 +3,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
+/data/
 .claude/settings.local.json
+.mypy_cache/
+.ruff_cache/
+dist/
+*.egg-info/
