@@ -12,7 +12,7 @@ roles and cloud resources, all modelled below.
 | Variable | Local (`podman compose`) | Azure job | Secret? | Validation |
 |---|---|---|---|---|
 | `DATABASE_URL` | `postgresql://market_anomaly_agent:<pw>@host.containers.internal:5432/market_anomaly_agent` | `postgresql://id-maa-job@<server>.postgres.database.azure.com:5432/market_anomaly_agent?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt` | Local: yes (contains password). Azure: no | Required. With `DATABASE_AUTH=entra`: must have no password and must have `sslmode=verify-full`, otherwise exit 1 before connecting. |
-| `DATABASE_AUTH` | unset (= `password`) | `entra` | no | `password` or `entra`; any other value exits 1. |
+| `DATABASE_AUTH` | unset or empty (= `password`) | `entra` | no | `password` or `entra`; unset or empty (`DATABASE_AUTH=`) means `password`; any other value exits 1. |
 | `AZURE_CLIENT_ID` | unset | client ID of `id-maa-job` | no | Required when `DATABASE_AUTH=entra`. |
 | `PRICE_DATA_API_KEY` | from `.env` | Key Vault reference `twelve-data-api-key` via job secret `price-data-api-key` | **yes** | Required, but only once a vendor fetch is needed. A `--latest` start whose day is already stored does not read it. |
 | `APP_COMMIT` | unset (logged as `unknown`) | baked into the image from build arg `GIT_SHA` | no | Free text, logged as is. |

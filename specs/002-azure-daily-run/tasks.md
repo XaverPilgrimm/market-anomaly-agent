@@ -136,7 +136,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
 
 ### Tests for User Story 1 ⚠️ write first, see them fail
 
-- [ ] T008 [P] [US1] In `tests/unit/test_calendar.py`, add tests for `calendar.latest_completed_trading_day(now: datetime) -> date`. Every input is a timezone-aware datetime, and the expected value is the most recent NASDAQ trading day strictly before the New York calendar date of `now`:
+- [X] T008 [P] [US1] In `tests/unit/test_calendar.py`, add tests for `calendar.latest_completed_trading_day(now: datetime) -> date`. Every input is a timezone-aware datetime, and the expected value is the most recent NASDAQ trading day strictly before the New York calendar date of `now`:
   - Tue 2026-11-10 11:00 UTC → Mon 2026-11-09.
   - Sat 2026-11-14 11:00 UTC → Fri 2026-11-13.
   - Fri 2026-11-27 11:00 UTC (the day after Thanksgiving, an early-close trading day) → Wed 2026-11-25.
@@ -144,8 +144,8 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - 2026-11-10 00:30 UTC (still 2026-11-09 in New York) → Fri 2026-11-06.
   - Both sides of the 2026-11-01 daylight-saving change: 2026-10-31 11:00 UTC and 2026-11-03 11:00 UTC.
   - A naive datetime raises `ValueError`.
-- [ ] T009 [P] [US1] Create `tests/unit/storage/__init__.py` and `tests/unit/storage/test_db.py` for `storage/db.py` (monkeypatch env vars and `psycopg.connect`, so no connection is opened):
-  - (a) With `DATABASE_AUTH` unset or `password`, `connect()` calls `psycopg.connect(url, autocommit=True)` exactly as before.
+- [X] T009 [P] [US1] Create `tests/unit/storage/__init__.py` and `tests/unit/storage/test_db.py` for `storage/db.py` (monkeypatch env vars and `psycopg.connect`, so no connection is opened):
+  - (a) With `DATABASE_AUTH` unset, empty (`DATABASE_AUTH=`) or `password`, `connect()` calls `psycopg.connect(url, autocommit=True)` exactly as before.
   - (b) With `DATABASE_AUTH=entra`:
     - `ManagedIdentityCredential` (monkeypatched on `market_anomaly_agent.storage.db`) is constructed with `client_id=$AZURE_CLIENT_ID`.
     - `get_token` is called with `ENTRA_SCOPE`.
@@ -153,16 +153,16 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
     - `db.issued_tokens()` then contains the token.
     - A second `connect()` calls `get_token` again.
   - (c) With `entra`, each of these raises `DatabaseConfigError` before `get_token`: `AZURE_CLIENT_ID` missing; `DATABASE_URL` containing a password; `DATABASE_URL` without `sslmode=verify-full`.
-  - (d) Any `DATABASE_AUTH` value other than `password` or `entra` raises `DatabaseConfigError`.
+  - (d) Any non-empty `DATABASE_AUTH` value other than `password` or `entra` raises `DatabaseConfigError`.
   - (e) A `get_token` exception propagates (the CLI maps it to exit 1).
-- [ ] T010 [US1] Extend `tests/unit/test_cli.py`, following its existing fakes:
+- [X] T010 [US1] Extend `tests/unit/test_cli.py`, following its existing fakes:
   - (a) `--date` together with `--latest` → exit 2. Neither → exit 2.
   - (b) `--latest` with `now=lambda: datetime(2026, 11, 10, 11, 0, tzinfo=UTC)` evaluates 2026-11-09. `run_detection` receives that day, and the output and exit code match a `--date 2026-11-09` run with the same fakes.
   - (c) The first INFO line is exactly `start mode=latest evaluated_date=2026-11-09 version=abc123` with `APP_COMMIT=abc123`, and ends `version=unknown` when unset. A `--date` run logs `mode=date`.
   - (d) `--migrate` calls a faked `apply_migrations` once, before `load_universe_tickers` or `load_run`, and logs `applied migration(s): …` or `none`. Without `--migrate` it is not called.
   - (e) `apply_migrations` raising → exit 1, nothing else called, and the message is scrubbed.
   - (f) A token registered through a faked `db.issued_tokens()` that appears in a forced exception message is printed as `***` in stderr, including the traceback.
-- [ ] T011 [US1] In `tests/integration/test_detect_end_to_end.py`, reuse the `make_detect` and `Detect` pattern, extended so `Detect` can pass extra argv and `now`. Add three tests:
+- [X] T011 [US1] In `tests/integration/test_detect_end_to_end.py`, reuse the `make_detect` and `Detect` pattern, extended so `Detect` can pass extra argv and `now`. Add three tests:
   - (a) `--latest --migrate` on a fresh, unmigrated schema (use `db_conn`, not `migrated_conn`) creates every table, stores the resolved day, and `schema_migrations` lists `0001_init.sql`.
   - (b) A second `--migrate` run applies `none`.
   - (c) `--latest` for a day that is not stored produces the same stored rows as `--date` for that day (compare with `table_contents`).
@@ -173,7 +173,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
 - [ ] T013 [P] [US1] Implement Entra mode in `src/market_anomaly_agent/storage/db.py` per contracts/cli-contract.md (Environment) and data-model.md §1, making T009 pass:
   - The constants `AUTH_ENV_VAR`, `CLIENT_ID_ENV_VAR` and `ENTRA_SCOPE`.
   - A module-level `_issued: list[str]` and `issued_tokens() -> tuple[str, ...]`.
-  - In `connect()`, read `DATABASE_AUTH` (default `password`). In `entra` mode, apply data-model.md §1's rules verbatim: "must have no password and must have `sslmode=verify-full`, otherwise exit 1 before connecting" (raise `DatabaseConfigError`), and require `AZURE_CLIENT_ID`. Then get a token with `ManagedIdentityCredential(client_id=…).get_token(ENTRA_SCOPE).token` (imported as `from azure.identity import ManagedIdentityCredential`), append it to `_issued`, and return `psycopg.connect(url, password=token, autocommit=True)`.
+  - In `connect()`, read `DATABASE_AUTH`; unset or empty means `password` (`os.environ.get(AUTH_ENV_VAR) or "password"`). In `entra` mode, apply data-model.md §1's rules verbatim: "must have no password and must have `sslmode=verify-full`, otherwise exit 1 before connecting" (raise `DatabaseConfigError`), and require `AZURE_CLIENT_ID`. Then get a token with `ManagedIdentityCredential(client_id=…).get_token(ENTRA_SCOPE).token` (imported as `from azure.identity import ManagedIdentityCredential`), append it to `_issued`, and return `psycopg.connect(url, password=token, autocommit=True)`.
   - Never log the URL or the token. Update the module docstring.
 - [ ] T014 [US1] Update `src/market_anomaly_agent/cli.py` per contracts/cli-contract.md, making T010 pass:
   - A required mutually exclusive argparse group of `--date` and `--latest`, plus `--migrate`.

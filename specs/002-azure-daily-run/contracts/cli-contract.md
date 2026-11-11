@@ -59,7 +59,7 @@ Feature 001's table still applies, with these additions:
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_AUTH` | `password` (default; 001 behaviour) or `entra` |
+| `DATABASE_AUTH` | `password` (default; 001 behaviour) or `entra`. Unset or empty means `password`, so a blank `DATABASE_AUTH=` line in `.env` keeps the 001 behaviour. Any other value exits 1. |
 | `AZURE_CLIENT_ID` | Client ID of the user-assigned managed identity; required with `DATABASE_AUTH=entra` |
 | `APP_COMMIT` | Commit SHA the image was built from; logged only |
 

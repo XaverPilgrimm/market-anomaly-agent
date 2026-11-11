@@ -1,8 +1,10 @@
 """quickstart.md scenarios 1-5 in-process: `cli.main` against a real local PostgreSQL, with a
 fixture universe file and the shared fake price source from tests/support/fakes.py."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -13,6 +15,7 @@ from market_anomaly_agent.rules import BENCHMARK_TICKER
 from tests.support.fakes import (
     DAYS,
     GOOGL_SPEC,
+    NOW,
     US1_SPECS,
     D,
     FakeSource,
@@ -50,28 +53,40 @@ def table_contents(
 
 
 class Detect:
-    """Runs `cli.main` for D against `source`, which a test may replace between runs."""
+    """Runs `cli.main` for D against `source`, which a test may replace between runs.
 
-    def __init__(self, source: FakeSource) -> None:
+    `argv` defaults to `--date D`. `now` is passed to `cli.main` only when given, so the 001
+    tests keep calling it exactly as before."""
+
+    def __init__(
+        self,
+        source: FakeSource,
+        argv: Sequence[str] = ARGV,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
         self.source = source
+        self.argv = list(argv)
+        self.now = now
 
     def __call__(self) -> int:
         def factory(api_key: str) -> PriceDataSource:
             return self.source
 
-        return cli.main(ARGV, source_factory=factory)
+        kwargs: dict[str, Any] = {"source_factory": factory}
+        if self.now is not None:
+            kwargs["now"] = self.now
+        return cli.main(self.argv, **kwargs)
 
 
-@pytest.fixture
-def make_detect(
-    migrated_conn: Conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _detect_factory(
+    conn: Conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Callable[[dict[str, StockSpec]], Detect]:
-    """A `Detect` for a fixture universe of `specs`' tickers, writing to the test's schema."""
-    row = migrated_conn.execute("SELECT current_schema()").fetchone()
+    """Points the CLI at `conn`'s schema and a fixture universe file in `tmp_path`."""
+    row = conn.execute("SELECT current_schema()").fetchone()
     assert row is not None
     schema = str(row[0])
-    url = migrated_conn.info.dsn
-    password = migrated_conn.info.password
+    url = conn.info.dsn
+    password = conn.info.password
 
     def connect() -> Conn:
         return psycopg.connect(
@@ -88,6 +103,22 @@ def make_detect(
         return Detect(FakeSource(specs))
 
     return make
+
+
+@pytest.fixture
+def make_detect(
+    migrated_conn: Conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[dict[str, StockSpec]], Detect]:
+    """A `Detect` for a fixture universe of `specs`' tickers, writing to the test's schema."""
+    return _detect_factory(migrated_conn, tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def make_fresh_detect(
+    db_conn: Conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[dict[str, StockSpec]], Detect]:
+    """Like `make_detect`, but on a fresh schema with no migration applied (002 FR-006)."""
+    return _detect_factory(db_conn, tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -367,3 +398,93 @@ def test_rerun_with_an_unavailable_ticker_reproduces_the_day(
 
     assert "reproduced" in capsys.readouterr().err
     assert table_contents(migrated_conn, ALL_TABLES) == before
+
+
+# --- Feature 002: `--latest` and `--migrate` (contracts/cli-contract.md, 002) ----------------
+# NOW (2026-10-28 11:00 UTC, 07:00 New York) resolves to D (2026-10-27).
+
+LATEST_ARGV = ["--latest"]
+
+
+def without_timestamps(
+    contents: dict[str, list[tuple[object, ...]]],
+) -> dict[str, list[tuple[object, ...]]]:
+    """computed_at and fetched_at record the wall-clock time of each run; drop them so two runs
+    of the same day can be compared."""
+    return {
+        table: [tuple(v for v in row if not isinstance(v, datetime)) for row in rows]
+        for table, rows in contents.items()
+    }
+
+
+def table_names(conn: Conn) -> set[str]:
+    rows = conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+@pytest.mark.integration
+def test_latest_with_migrate_on_a_fresh_schema_creates_the_tables_and_stores_the_day(
+    make_fresh_detect: Callable[[dict[str, StockSpec]], Detect],
+    db_conn: Conn,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """002 US1 scenarios 1 and 2: migrations run before detection, inside the same command."""
+    assert table_names(db_conn) == set()
+    detect = make_fresh_detect(SPECS)
+    detect.argv = [*LATEST_ARGV, "--migrate"]
+    detect.now = lambda: NOW
+    caplog.set_level("INFO")
+
+    assert detect() == 0
+
+    assert set(ALL_TABLES) | {"schema_migrations"} <= table_names(db_conn)
+    applied = db_conn.execute("SELECT filename FROM schema_migrations ORDER BY 1").fetchall()
+    assert [str(r[0]) for r in applied] == ["0001_init.sql"]
+    assert runs_for_d(db_conn) == 1
+    assert capsys.readouterr().out.strip().splitlines()[-1] == SUMMARY
+    assert "applied migration(s): 0001_init.sql" in caplog.text
+
+
+@pytest.mark.integration
+def test_a_second_migrate_run_applies_nothing(
+    make_fresh_detect: Callable[[dict[str, StockSpec]], Detect],
+    db_conn: Conn,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    detect = make_fresh_detect(SPECS)
+    detect.argv = [*LATEST_ARGV, "--migrate"]
+    detect.now = lambda: NOW
+    assert detect() == 0
+    caplog.clear()
+    caplog.set_level("INFO")
+
+    assert detect() == 0
+
+    assert "applied migration(s): none" in caplog.text
+    applied = db_conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
+    assert applied is not None and applied[0] == 1
+
+
+@pytest.mark.integration
+def test_latest_stores_the_same_rows_as_an_explicit_date(
+    detect: Detect, migrated_conn: Conn, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """002 FR-003: when the resolved day is not stored, `--latest` behaves like `--date`."""
+    detect.argv = LATEST_ARGV
+    detect.now = lambda: NOW
+    assert detect() == 0
+    latest_out = capsys.readouterr().out
+    latest_rows = without_timestamps(table_contents(migrated_conn, TABLES))
+
+    for table in reversed(TABLES):  # children first: the foreign keys point at detection_runs
+        migrated_conn.execute(f"DELETE FROM {table}".encode())
+    detect.argv = ARGV
+    detect.now = None
+    assert detect() == 0
+
+    assert without_timestamps(table_contents(migrated_conn, TABLES)) == latest_rows
+    assert capsys.readouterr().out == latest_out
+    assert latest_out.strip().splitlines()[-1] == SUMMARY
