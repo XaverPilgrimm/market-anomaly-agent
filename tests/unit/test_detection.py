@@ -30,6 +30,8 @@ from tests.support.fakes import (
     D,
     FakeSource,
     StockSpec,
+    drop_bars,
+    keep_paired_returns,
 )
 
 
@@ -234,16 +236,6 @@ FLAT = StockSpec(0.0, 0.0, 0.0, 0.0)  # constant price: every return is exactly 
 
 def fillers(count: int) -> dict[str, StockSpec]:
     return {f"N{i:02d}": FILLER for i in range(count)}
-
-
-def keep_paired_returns(source: FakeSource, ticker: str, paired: int) -> None:
-    """Cut `ticker`'s history so exactly `paired` returns exist before D (bars -> returns - 1,
-    minus D's own return)."""
-    source.bars[ticker] = source.bars[ticker][-(paired + 2) :]
-
-
-def drop_bars(source: FakeSource, ticker: str, *days: date) -> None:
-    source.bars[ticker] = [b for b in source.bars[ticker] if b.trading_date not in days]
 
 
 def outcomes(result: DetectionResult) -> dict[str, str]:

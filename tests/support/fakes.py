@@ -106,6 +106,16 @@ class FakeSource:
         return [b for b in self.bars[ticker] if start <= b.trading_date <= end]
 
 
+def keep_paired_returns(source: FakeSource, ticker: str, paired: int) -> None:
+    """Cut `ticker`'s history so exactly `paired` returns exist before D (bars -> returns - 1,
+    minus D's own return)."""
+    source.bars[ticker] = source.bars[ticker][-(paired + 2) :]
+
+
+def drop_bars(source: FakeSource, ticker: str, *days: date) -> None:
+    source.bars[ticker] = [b for b in source.bars[ticker] if b.trading_date not in days]
+
+
 US1_SPECS = {
     "FLAG": StockSpec(0.001, 1.5, 1.0, 0.02, volume_on_d=3_000_000),  # z ~ +9.92
     "AAA": StockSpec(0.0005, 1.2, 1.0, 0.0),  # z = 0

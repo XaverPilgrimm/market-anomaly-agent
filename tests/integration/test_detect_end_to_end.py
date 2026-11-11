@@ -1,4 +1,4 @@
-"""quickstart.md scenarios 1-3 in-process: `cli.main` against a real local PostgreSQL, with a
+"""quickstart.md scenarios 1-5 in-process: `cli.main` against a real local PostgreSQL, with a
 fixture universe file and the shared fake price source from tests/support/fakes.py."""
 
 from collections.abc import Callable
@@ -8,8 +8,19 @@ import psycopg
 import pytest
 
 from market_anomaly_agent import cli
-from market_anomaly_agent.data.source import PriceDataSource
-from tests.support.fakes import DAYS, GOOGL_SPEC, US1_SPECS, D, FakeSource, write_universe_file
+from market_anomaly_agent.data.source import PriceDataSource, PriceDataUnavailable
+from market_anomaly_agent.rules import BENCHMARK_TICKER
+from tests.support.fakes import (
+    DAYS,
+    GOOGL_SPEC,
+    US1_SPECS,
+    D,
+    FakeSource,
+    StockSpec,
+    drop_bars,
+    keep_paired_returns,
+    write_universe_file,
+)
 
 Conn = psycopg.Connection[tuple[object, ...]]
 
@@ -38,19 +49,24 @@ def table_contents(
     }
 
 
-@pytest.fixture
-def source() -> FakeSource:
-    return FakeSource(SPECS)
+class Detect:
+    """Runs `cli.main` for D against `source`, which a test may replace between runs."""
+
+    def __init__(self, source: FakeSource) -> None:
+        self.source = source
+
+    def __call__(self) -> int:
+        def factory(api_key: str) -> PriceDataSource:
+            return self.source
+
+        return cli.main(ARGV, source_factory=factory)
 
 
 @pytest.fixture
-def detect(
-    migrated_conn: Conn,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    source: FakeSource,
-) -> Callable[[], int]:
-    """`cli.main` for D, writing to the test's schema and reading the fixture universe."""
+def make_detect(
+    migrated_conn: Conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[dict[str, StockSpec]], Detect]:
+    """A `Detect` for a fixture universe of `specs`' tickers, writing to the test's schema."""
     row = migrated_conn.execute("SELECT current_schema()").fetchone()
     assert row is not None
     schema = str(row[0])
@@ -62,16 +78,26 @@ def detect(
             url, password=password, autocommit=True, options=f"-c search_path={schema}"
         )
 
-    size = write_universe_file(tmp_path, sorted(SPECS))
     monkeypatch.setattr(cli, "UNIVERSE_DIR", tmp_path)
-    monkeypatch.setattr(cli, "EXPECTED_UNIVERSE_SIZE", size)
     monkeypatch.setattr(cli, "connect", connect)
     monkeypatch.setenv("PRICE_DATA_API_KEY", "test-key")
 
-    def factory(api_key: str) -> PriceDataSource:
-        return source
+    def make(specs: dict[str, StockSpec]) -> Detect:
+        size = write_universe_file(tmp_path, sorted(specs))
+        monkeypatch.setattr(cli, "EXPECTED_UNIVERSE_SIZE", size)
+        return Detect(FakeSource(specs))
 
-    return lambda: cli.main(ARGV, source_factory=factory)
+    return make
+
+
+@pytest.fixture
+def detect(make_detect: Callable[[dict[str, StockSpec]], Detect]) -> Detect:
+    return make_detect(SPECS)
+
+
+@pytest.fixture
+def source(detect: Detect) -> FakeSource:
+    return detect.source
 
 
 def runs_for_d(conn: Conn) -> int:
@@ -194,4 +220,150 @@ def test_universe_file_changed_after_first_run_exits_1_before_fetching(
     assert captured.out == ""
     assert "UniverseFrozenError" in captured.err and "edited FLAG" in captured.err
     assert source.calls == []
+    assert table_contents(migrated_conn, ALL_TABLES) == before
+
+
+# --- US3: quickstart.md scenarios 4 and 5 (T041) ------------------------------------------------
+#
+# Every fixture universe keeps its missing_data skips at or below 20% of its tickers (FR-023).
+
+FILLER = StockSpec(0.0, 1.0, 1.0, 0.0)  # z = 0: evaluated, never flagged
+# 100 tickers: 99 fillers plus the GOOGL row every fixture universe has
+HUNDRED = {**{f"N{i:02d}": FILLER for i in range(99)}, "GOOGL": GOOGL_SPEC}
+
+
+def stored_for_d(conn: Conn) -> dict[str, int]:
+    """Row count per run table for D."""
+    counts: dict[str, int] = {}
+    for table in TABLES:
+        row = conn.execute(
+            f"SELECT count(*) FROM {table} WHERE evaluated_date = %s".encode(), (D,)
+        ).fetchone()
+        assert row is not None
+        counts[table] = int(str(row[0]))
+    return counts
+
+
+NOTHING_FOR_D = dict.fromkeys(TABLES, 0)
+
+
+def stored_skips(conn: Conn) -> list[tuple[str, str]]:
+    rows = conn.execute(
+        "SELECT ticker, reason_code FROM skipped_stock_records ORDER BY ticker"
+    ).fetchall()
+    return [(str(t), str(r)) for t, r in rows]
+
+
+def stored_evaluated(conn: Conn) -> list[str]:
+    rows = conn.execute("SELECT ticker FROM evaluated_stock_records ORDER BY ticker").fetchall()
+    return [str(r[0]) for r in rows]
+
+
+@pytest.mark.integration
+def test_short_history_is_stored_as_an_insufficient_history_skip(
+    make_detect: Callable[[dict[str, StockSpec]], Detect], migrated_conn: Conn
+) -> None:
+    """Scenario 4."""
+    detect = make_detect({**SPECS, "SHORT": FILLER})
+    keep_paired_returns(detect.source, "SHORT", 45)
+
+    assert detect() == 0
+
+    assert stored_skips(migrated_conn) == [("SHORT", "insufficient_history")]
+    assert stored_evaluated(migrated_conn) == sorted(SPECS)
+    flagged = migrated_conn.execute("SELECT ticker FROM anomaly_cases").fetchall()
+    assert [str(r[0]) for r in flagged] == ["FLAG"]
+
+
+@pytest.mark.integration
+def test_unusable_benchmark_exits_4_and_the_day_can_be_run_again(
+    make_detect: Callable[[dict[str, StockSpec]], Detect],
+    migrated_conn: Conn,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scenario 5, FR-022."""
+    detect = make_detect(SPECS)
+    drop_bars(detect.source, BENCHMARK_TICKER, D)
+
+    assert detect() == 4
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert BENCHMARK_TICKER in captured.err and D.isoformat() in captured.err
+    assert stored_for_d(migrated_conn) == NOTHING_FOR_D
+
+    detect.source = FakeSource(SPECS)
+    assert detect() == 0
+    assert capsys.readouterr().out.strip().splitlines()[-1] == SUMMARY
+    assert runs_for_d(migrated_conn) == 1
+
+
+def _miss_evaluated_day(source: FakeSource, count: int) -> list[str]:
+    tickers = sorted(HUNDRED)[:count]
+    for ticker in tickers:
+        drop_bars(source, ticker, D)
+    return tickers
+
+
+@pytest.mark.integration
+def test_21_of_100_missing_exits_4_and_the_day_can_be_run_again(
+    make_detect: Callable[[dict[str, StockSpec]], Detect],
+    migrated_conn: Conn,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scenario 5, FR-023: more than 20% missing data stores nothing."""
+    detect = make_detect(HUNDRED)
+    _miss_evaluated_day(detect.source, 21)
+
+    assert detect() == 4
+
+    assert "21 of 100" in capsys.readouterr().err
+    assert stored_for_d(migrated_conn) == NOTHING_FOR_D
+
+    detect.source = FakeSource(HUNDRED)
+    assert detect() == 0
+    assert stored_evaluated(migrated_conn) == sorted(HUNDRED)
+    assert stored_skips(migrated_conn) == []
+
+
+@pytest.mark.integration
+def test_exactly_20_of_100_missing_completes_with_20_skips(
+    make_detect: Callable[[dict[str, StockSpec]], Detect], migrated_conn: Conn
+) -> None:
+    """FR-023: exactly 20% still completes."""
+    detect = make_detect(HUNDRED)
+    missing = _miss_evaluated_day(detect.source, 20)
+
+    assert detect() == 0
+
+    assert stored_skips(migrated_conn) == [(t, "missing_data") for t in missing]
+    assert len(stored_evaluated(migrated_conn)) == 80
+    assert runs_for_d(migrated_conn) == 1
+
+
+@pytest.mark.integration
+def test_rerun_with_an_unavailable_ticker_reproduces_the_day(
+    make_detect: Callable[[dict[str, StockSpec]], Detect],
+    migrated_conn: Conn,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ticker the vendor has no data for has no stored bars, so an unchanged re-run still
+    matches the stored snapshot (T040). 1 of 10 tickers is missing data."""
+    specs = {**SPECS, **{f"N{i:02d}": FILLER for i in range(5)}}
+    detect = make_detect(specs)
+    detect.source.raises["BBB"] = PriceDataUnavailable("BBB: symbol not found")
+
+    assert detect() == 0
+
+    assert stored_skips(migrated_conn) == [("BBB", "missing_data")]
+    bbb_bars = migrated_conn.execute(
+        "SELECT count(*) FROM daily_price_bars WHERE ticker = 'BBB'"
+    ).fetchone()
+    assert bbb_bars == (0,)
+    before = table_contents(migrated_conn, ALL_TABLES)
+    capsys.readouterr()
+
+    assert detect() == 0
+
+    assert "reproduced" in capsys.readouterr().err
     assert table_contents(migrated_conn, ALL_TABLES) == before

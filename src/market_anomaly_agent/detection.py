@@ -4,6 +4,7 @@ Pure orchestration over a PriceDataSource: no database access. Calculations run 
 every stored number is converted with Decimal(repr(value)) ("Shared decisions" in tasks.md).
 """
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -19,15 +20,19 @@ from market_anomaly_agent.calc.ranking import apply_daily_cap
 from market_anomaly_agent.calc.returns import simple_returns
 from market_anomaly_agent.calc.volume import volume_ratio
 from market_anomaly_agent.calendar import fetch_window_start, trading_days_between
-from market_anomaly_agent.data.source import DailyBar, PriceDataSource
+from market_anomaly_agent.data.source import DailyBar, PriceDataSource, PriceDataUnavailable
 from market_anomaly_agent.rules import (
     BENCHMARK_TICKER,
     DAILY_CAP,
+    MAX_MISSING_DATA_PERCENT,
     MAX_WINDOW_DAYS,
+    MIN_WINDOW_DAYS,
     RULE_VERSION,
     VOLUME_WINDOW_DAYS,
     Z_THRESHOLD,
 )
+
+log = logging.getLogger(__name__)
 
 
 class RunAbortedError(Exception):
@@ -104,38 +109,92 @@ def _to_decimal(value: float) -> Decimal:
     return Decimal(repr(value))
 
 
+def _missing_day(bars: Sequence[DailyBar], days: Sequence[date]) -> date | None:
+    """The first of `days` without a bar in `bars`, or None when all are present."""
+    present = {b.trading_date for b in bars}
+    return next((d for d in days if d not in present), None)
+
+
+def _skip(ticker: str, reason_code: str, reason_detail: str) -> SkippedRecord:
+    log.info("skipped %s: %s (%s)", ticker, reason_code, reason_detail)
+    return SkippedRecord(ticker=ticker, reason_code=reason_code, reason_detail=reason_detail)
+
+
 def run_detection(
     evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, now: datetime
 ) -> DetectionResult:
     """Evaluate every ticker in `tickers` for `evaluated_date` against BENCHMARK_TICKER.
 
-    Assumes complete data; skip handling and the run-level checks are added with US3 (T040).
+    A ticker without usable data is skipped with `missing_data` or `insufficient_history` (FR-012,
+    FR-017). Raises BenchmarkUnavailableError (FR-022) or TooMuchMissingDataError (FR-023) before
+    returning anything; PriceDataError from the source is never caught.
     """
     start = fetch_window_start(evaluated_date)
     days = trading_days_between(start, evaluated_date)
     estimation_days = days[:-1]
+    return_days = days[-2:]  # a return on D needs the bars of D and the previous trading day
 
-    benchmark_bars = tuple(source.get_daily_bars(BENCHMARK_TICKER, start, evaluated_date))
+    try:
+        benchmark_bars = tuple(source.get_daily_bars(BENCHMARK_TICKER, start, evaluated_date))
+    except PriceDataUnavailable as exc:
+        raise BenchmarkUnavailableError(
+            f"benchmark {BENCHMARK_TICKER} is unavailable from the price source: {exc}"
+        ) from exc
+    gap = _missing_day(benchmark_bars, return_days)
+    if gap is not None:
+        raise BenchmarkUnavailableError(
+            f"benchmark {BENCHMARK_TICKER} has no bar on {gap.isoformat()}, so it has no return "
+            f"on {evaluated_date.isoformat()}"
+        )
     benchmark_returns = simple_returns({b.trading_date: b.close for b in benchmark_bars}, days)
     benchmark_on_d = benchmark_returns[evaluated_date]
 
     bars: dict[str, tuple[DailyBar, ...]] = {BENCHMARK_TICKER: benchmark_bars}
     records: dict[str, EvaluatedRecord] = {}
     scores: dict[str, float] = {}
+    skipped: list[SkippedRecord] = []
     for ticker in sorted(tickers):
-        ticker_bars = tuple(source.get_daily_bars(ticker, start, evaluated_date))
-        bars[ticker] = ticker_bars
-        returns = simple_returns({b.trading_date: b.close for b in ticker_bars}, days)
+        try:
+            ticker_bars = tuple(source.get_daily_bars(ticker, start, evaluated_date))
+        except PriceDataUnavailable as exc:
+            skipped.append(_skip(ticker, "missing_data", f"no data from the price source: {exc}"))
+            continue
+        if ticker_bars:  # no key for no bars, matching a snapshot read back from storage
+            bars[ticker] = ticker_bars
+        gap = _missing_day(ticker_bars, return_days)
+        if gap is not None:
+            skipped.append(_skip(ticker, "missing_data", f"no bar on {gap.isoformat()}"))
+            continue
 
+        returns = simple_returns({b.trading_date: b.close for b in ticker_bars}, days)
         paired = [d for d in estimation_days if d in returns and d in benchmark_returns]
+        if len(paired) < MIN_WINDOW_DAYS:
+            skipped.append(
+                _skip(
+                    ticker,
+                    "insufficient_history",
+                    f"{len(paired)} paired returns before {evaluated_date.isoformat()}, "
+                    f"{MIN_WINDOW_DAYS} required",
+                )
+            )
+            continue
         paired = paired[-MAX_WINDOW_DAYS:]
         model = fit_market_model(
             [returns[d] for d in paired], [benchmark_returns[d] for d in paired]
         )
-        actual = returns[evaluated_date]
+        actual = returns[evaluated_date]  # present: both return_days bars were checked above
         expected = expected_return(model, benchmark_on_d)
         abnormal = abnormal_return(actual, expected)
-        z = z_score(abnormal, model.residual_std)
+        try:
+            z = z_score(abnormal, model.residual_std)
+        except ValueError:
+            detail = (
+                "zero residual variance"
+                if model.residual_std == 0.0
+                else f"unusable residual standard deviation {model.residual_std!r}"
+            )
+            skipped.append(_skip(ticker, "missing_data", detail))
+            continue
 
         scores[ticker] = z
         records[ticker] = EvaluatedRecord(
@@ -147,6 +206,13 @@ def run_detection(
             alpha=_to_decimal(model.alpha),
             beta=_to_decimal(model.beta),
             estimation_window_days=model.n,
+        )
+
+    missing = sum(1 for s in skipped if s.reason_code == "missing_data")
+    if missing * 100 > len(tickers) * MAX_MISSING_DATA_PERCENT:
+        raise TooMuchMissingDataError(
+            f"{missing} of {len(tickers)} tickers are missing data for "
+            f"{evaluated_date.isoformat()}, more than {MAX_MISSING_DATA_PERCENT}% (FR-023)"
         )
 
     cap = apply_daily_cap(scores, Z_THRESHOLD, DAILY_CAP)
@@ -166,13 +232,11 @@ def run_detection(
             )
         )
 
-    skipped = [
-        SkippedRecord(
-            ticker=ticker,
-            reason_code="cap_exceeded",
-            reason_detail=(
-                f"abs z={abs(scores[ticker]):.4f}, rank {rank} of {qualifying_count} qualifying"
-            ),
+    skipped += [
+        _skip(
+            ticker,
+            "cap_exceeded",
+            f"abs z={abs(scores[ticker]):.4f}, rank {rank} of {qualifying_count} qualifying",
         )
         for ticker, rank in cap.cap_exceeded
     ]
