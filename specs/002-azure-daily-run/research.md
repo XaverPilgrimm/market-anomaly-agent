@@ -1,0 +1,429 @@
+# Research: Unattended Daily Run on Azure
+
+**Feature**: [spec.md](./spec.md) | **Plan**: [plan.md](./plan.md) | **Date**: 2026-11-11
+
+Each section records a decision, why it was made, and what else was considered. Facts taken from
+Microsoft's documentation are quoted or cited. Inferences are marked as such. Items that can only
+be settled against the owner's own subscription are turned into explicit checks in
+[quickstart.md](./quickstart.md), to be run on the host before the first real deployment.
+
+---
+
+## R1. Job time limit: per attempt or per execution?
+
+**Decision**: `replicaTimeout = 3600` seconds, `replicaRetryLimit = 2`, `parallelism = 1`,
+`replicaCompletionCount = 1`. Before go-live, quickstart check Q3 confirms the behaviour
+empirically. If the timer turns out to apply per attempt, the value is lowered to `1800`.
+
+**What the documentation says** ([Jobs in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/jobs)):
+
+- `replicaTimeout`: "The maximum time in seconds to wait for a replica to complete."
+- `replicaRetryLimit`: "The maximum number of times to retry a failed replica. To fail a replica
+  without retrying, set the value to `0`." So the limit counts retries, and 2 means up to
+  3 attempts.
+- "The `replicaTimeout` setting takes precedence if it expires before all retries occur."
+- No backoff between retries is documented.
+- "Cron expressions in scheduled jobs are evaluated in Coordinated Universal Time (UTC)."
+
+**Reading**: the documentation never says outright whether the timer is per attempt or per
+execution. The "takes precedence … before all retries occur" sentence only makes sense if a single
+timer can cut off retries that have not yet run, which means it covers the whole execution
+(*inference*). That reading is the conservative one for sizing, so the value is chosen to fit all
+3 attempts:
+
+| Item | Minutes |
+|---|---|
+| 3 attempts × ~13 min (101 requests at the free plan's 8 per minute) | 39 |
+| Image pull and container start, 3 × ~1 | 3 |
+| Retry restarts and rate-limit waits at attempt boundaries (an immediate retry can hit the per-minute limit and wait up to 60 s, `RATE_LIMIT_WAIT_SECONDS`) | 3 |
+| Slack for a slower vendor | ~15 |
+| **Limit** | **60** |
+
+**Effect on FR-011's deadline**: if the timer covers the execution, a run started at 11:00 UTC
+ends by about 12:00 UTC at the latest. If it turns out to be per attempt, the value becomes 1800,
+three attempts end by about 12:30 UTC, and a hung first attempt is still stopped after 30 minutes.
+Either way the run ends before the earliest US open at 13:30 UTC (SC-011). Keeping 3600 under a
+per-attempt reading would allow up to 3 hours, which is why check Q3 is a gate and not optional.
+
+**Alternatives considered**:
+
+- *An in-application wall-clock limit as a second guard.* Rejected for now (Principle II). The
+  platform limit plus check Q3 meets FR-011, and the vendor client already has a 30-second
+  per-request timeout (`TIMEOUT_SECONDS`).
+- *Setting 1800 straight away.* Rejected. Under the per-execution reading, which the documentation
+  suggests, it would cut off the third attempt and break US3 scenario 3.
+
+## R2. Region: Germany West Central
+
+**Decision**: target **Germany West Central** (`germanywestcentral`) for every resource of the
+feature. Quickstart check Q1 must pass on the owner's subscription before the first deployment.
+If it fails, use the first region on this fallback list that passes the same check, for all
+resources together (FR-015 requires one region): **West Europe → North Europe → Sweden Central**.
+
+**Findings**:
+
+- Container Apps jobs: `Microsoft.App/jobs` is generally available, and Germany West Central is a
+  Container Apps region. Check Q1 confirms this with
+  `az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='jobs'].locations"`.
+- PostgreSQL 17 is generally available on Flexible Server
+  ([release notes](https://learn.microsoft.com/en-us/azure/postgresql/release-notes/release-notes)).
+- **Risk**: Microsoft Q&A threads report that Germany West Central restricts Flexible Server
+  provisioning, and in particular the Burstable tier, for some subscription types because of
+  capacity. Examples: a 2025 moderator answer that Burstable "is not supported in Germany West
+  Central", and a later report that provisioning is limited to EA customers
+  ([Q&A 2182828](https://learn.microsoft.com/en-us/answers/questions/2182828/burstable-skus-seem-not-to-be-available-in-new-sub),
+  [Q&A 2260300](https://learn.microsoft.com/en-us/answers/questions/2260300/how-do-i-request-region-enablement-for-postgresql)).
+  These threads may be out of date, but availability can only be confirmed for this subscription,
+  with `az postgres flexible-server list-skus --location germanywestcentral`. That command must
+  show `Standard_B1ms` in the `Burstable` tier and `17` among the supported versions.
+- A support request for region enablement is possible, but it is not on the critical path: the
+  fallback regions are also EU and keep the design unchanged. Only the `location` parameter and the
+  cost table change.
+
+**Alternatives considered**: General Purpose `D2ds_v5` in Germany West Central. Rejected: it costs
+well over USD 100 per month and breaks the cap on its own.
+
+## R3. Database authentication and roles (who runs the migrations)
+
+**Decision**: the server allows Microsoft Entra authentication only
+(`authConfig: { activeDirectoryAuth: 'Enabled', passwordAuth: 'Disabled' }`). There are three
+principals:
+
+| Principal | PostgreSQL role | Created by | Privileges |
+|---|---|---|---|
+| Owner's Entra account | `<owner UPN>` (Entra admin) | Bicep, `flexibleServers/administrators` | Member of `azure_pg_admin`, CREATEROLE, CREATEDB. Used only for bootstrap, read-only queries, `pg_dump` and restore. Never used by the job. |
+| Job's user-assigned managed identity `id-maa-job` | `id-maa-job` | Bootstrap SQL, `pgaadauth_create_principal('id-maa-job', false, false)` in database `postgres` | `CONNECT, TEMPORARY` on database `market_anomaly_agent`; `USAGE, CREATE` on schema `public`. Owns every table its migrations create. Not superuser, no CREATEROLE, no CREATEDB. |
+| Owner → job role membership | — | Bootstrap SQL, `GRANT "id-maa-job" TO "<owner UPN>" WITH INHERIT TRUE, SET TRUE` | Lets the owner read every table the job owns (queries, `pg_dump`) and restore as the job role (`pg_restore --role`). |
+
+**The migrations run inside the job, as `id-maa-job`**, before detection starts (FR-006, the new
+`--migrate` flag in [contracts/cli-contract.md](./contracts/cli-contract.md)). The tables are
+therefore owned by the role that writes them, and no human step is needed when a later feature adds
+a migration. The owner never runs migrations against Azure.
+
+**Bootstrap** (`infra/sql/bootstrap.sql`, run once per new server by `infra/scripts/db-bootstrap.sh`
+on the host, as the Entra admin; idempotent):
+
+1. In `postgres`: create the principal if it is missing (`pgaadauth_create_principal`).
+2. In `postgres`: `CREATE DATABASE market_anomaly_agent` if it is missing. The admin creates it, so
+   the admin owns it and the `public` schema (PostgreSQL 15+: `pg_database_owner`) and can grant on
+   both. Bicep deliberately does not create the database, because the owner of an ARM-created
+   database is not documented.
+3. Grant the privileges in the table above, and `REVOKE ALL ON DATABASE market_anomaly_agent FROM
+   PUBLIC`.
+4. Grant the owner membership in `id-maa-job`.
+5. Fail loudly unless `has_schema_privilege('id-maa-job', 'public', 'CREATE')` and
+   `pg_has_role(current_user, 'id-maa-job', 'USAGE')` are both true.
+
+**Findings** ([connect with managed identity](https://learn.microsoft.com/en-us/azure/postgresql/security/security-connect-with-managed-identity),
+[manage Entra users](https://learn.microsoft.com/en-us/azure/postgresql/security/security-manage-entra-users),
+[configure Entra](https://learn.microsoft.com/en-us/azure/postgresql/security/security-entra-configure)):
+
+- `pgaadauth_create_principal(roleName text, isAdmin boolean, isMfa boolean)` "must be run on the
+  Postgres database". The role name "must match the name of the Microsoft Entra principal". For a
+  managed identity that is its name, and the token is its password.
+- The documentation says not to use the Entra administrator for regular database operations, so the
+  job gets its own role.
+- Step 4 relies on PostgreSQL 16+ behaviour: a CREATEROLE role that creates a role receives ADMIN
+  OPTION on it. Microsoft's pages do not say whether this holds when the role is created through
+  `pgaadauth_create_principal`. **Open risk, guarded**: step 5 fails the bootstrap if the
+  membership is missing. If it fails, the fallback is to drop the membership and give the owner
+  `SELECT` through `ALTER DEFAULT PRIVILEGES` issued by the job role in its own first execution.
+  That needs a small Azure-only bootstrap path in code and is not planned unless step 5 fails.
+- Token resource: `https://ossrdbms-aad.database.windows.net` (scope `…/.default`). On the host:
+  `az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv`. "The access
+  token is valid for 5 to 60 minutes." Because the token is only checked at login, the application
+  fetches one for each connection it opens.
+
+**Alternatives considered**:
+
+- *An Entra group shared by the owner and the job.* Rejected: it needs Graph permissions outside
+  Bicep's normal resource model, and both principals would act as the same role.
+- *Making the job role the database owner.* Rejected: it grants more than FR-017a's minimum.
+- *Having the owner run migrations from the host.* Rejected: it breaks FR-006 (unattended) and
+  splits table ownership.
+
+## R4. Identity survives teardown
+
+**Decision**: the job's user-assigned identity `id-maa-job` lives in the **data** resource group
+`rg-maa-data`, next to the server, under the CanNotDelete lock. The pipeline identity
+`id-maa-github` lives in the **environment** group `rg-maa-env` and is recreated with it.
+
+**Rationale**: the PostgreSQL role created by `pgaadauth_create_principal` is bound to the
+identity's object ID. Recreating `id-maa-job` under the same name after a teardown would produce a
+new object ID and lock the job out of its own tables. Keeping the identity with the data means a
+rebuild of the environment needs no database step. Its role assignments (Key Vault secret reader)
+are scoped to resources in `rg-maa-env`, so they are deleted and recreated with that group. Locks
+block deleting role assignments only inside the locked scope
+([lock-resources](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources)).
+
+## R5. Twelve Data key: Key Vault secret reference
+
+**Decision**: Key Vault (Standard, RBAC authorization, soft-delete retention 7 days, purge
+protection **off**) holds the single secret `twelve-data-api-key`. The job declares it as a secret
+reference and maps it to the existing variable:
+
+```bicep
+configuration: {
+  secrets: [ {
+    name: 'price-data-api-key'
+    keyVaultUrl: '${vault.properties.vaultUri}secrets/twelve-data-api-key'   // versionless → latest
+    identity: jobIdentity.id                                                  // id-maa-job resource ID
+  } ]
+}
+template: { containers: [ { env: [ { name: 'PRICE_DATA_API_KEY', secretRef: 'price-data-api-key' } ] } ] }
+```
+
+The field names follow the [Microsoft.App/jobs reference](https://learn.microsoft.com/en-us/azure/templates/microsoft.app/jobs):
+`identity` is the "Resource ID of a managed identity to authenticate with Azure Key Vault", and the
+identity must also appear under `identity.userAssignedIdentities`. `id-maa-job` gets the built-in
+**Key Vault Secrets User** role, scoped to that one secret (FR-019).
+
+**How the value gets in**: `deploy.sh` prompts with `read -rs` and passes it as the `@secure()`
+Bicep parameter `twelveDataApiKey`. The secret resource is created only when the parameter is
+non-empty, so a later redeploy can leave it empty and keep the stored value. Secure parameters are
+not shown by `what-if` and are not kept in deployment history. The owner gets **Key Vault Secrets
+Officer** on the vault, so the value can also be rotated with `az keyvault secret set`.
+
+**Soft delete and teardown**: purge protection stays off, so `teardown.sh` can purge the vault and
+an immediate redeploy can reuse its deterministic name (US4 scenario 3, FR-027).
+
+**Alternatives considered**: a plain job secret (value stored in the job resource). Rejected: the
+secret would be visible to anyone who can read the job, and FR-018 requires Key Vault.
+
+## R6. Container registry: ACR Basic vs GitHub Container Registry
+
+**Decision**: **GitHub Container Registry (GHCR), public package**
+`ghcr.io/xaverpilgrimm/market-anomaly-agent:<commit-sha>`. Azure Container Registry Basic remains
+the documented alternative. Switching back adds one Bicep module and an AcrPull assignment, and
+costs about EUR 4.45 per month (see R10).
+
+**Why**: with ACR the estimate is about EUR 23.33 of the EUR 30 cap (78%), against EUR 18.88 (63%)
+with GHCR. That cap must also cover Azure OpenAI once a later feature adds it (constitution
+Principle V), so the headroom matters: GHCR leaves about EUR 11 for it, ACR about EUR 7. ACR Basic
+is the only optional line item. GHCR is free for public packages, and the repository is already
+public. The owner confirmed GHCR on 2026-11-11.
+
+| | ACR Basic | GHCR (public) |
+|---|---|---|
+| Monthly cost | ~EUR 4.45 (~USD 5.00, daily-billed tier) | EUR 0 |
+| Push from GitHub Actions | OIDC identity needs `AcrPush` | `GITHUB_TOKEN` with `packages: write`; no Azure permission |
+| Pull by the job | `registries[].identity` + `AcrPull` for `id-maa-job` | Anonymous; no `registries` block, no role |
+| Azure permissions of pipeline identity | push + job update | job update only (narrower) |
+| Exposure | Private | Image is public. It contains no secret (FR-005, SC-007), and the code is already public |
+| Teardown | Images deleted with the group | Images survive teardown, so a rebuild can use the last image at once |
+| One-time manual step | none | Set the package's visibility to **public** once, after the first push (a GitHub setting, not an Azure portal step, so FR-024 is unaffected) |
+
+The spec only says "the project's container registry" (FR-007, FR-009, FR-019), so the
+requirements stand. The user description named ACR, so this choice is surfaced in the plan summary
+for the owner to confirm.
+
+## R7. GitHub Actions: checks, OIDC and deployment
+
+**Decision**: one workflow, `.github/workflows/ci.yml`.
+
+- Triggers: `pull_request` (branches: `main`), `push` (branches: `main`), and `workflow_dispatch`
+  (used once on `main` to publish the first image after the first deployment).
+- **Job `checks`** (all triggers, `permissions: contents: read`): `uv sync --frozen`, then
+  `ruff check`, `ruff format --check`, `mypy`, `pytest` (unit, network-guarded), and
+  `pytest -m integration` against a `postgres:17` service container. That container gets a
+  throwaway CI-only password and `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres`;
+  it is not a credential for anything real. The job also runs `az bicep build --file infra/main.bicep`,
+  an offline compile and lint that needs no Azure sign-in.
+- **Job `publish-deploy`** (`needs: checks`; `if: github.event_name != 'pull_request' &&
+  github.ref == 'refs/heads/main'`; `permissions: contents: read, packages: write, id-token:
+  write`):
+  1. Build the image with `--build-arg GIT_SHA=${{ github.sha }}` and push `:<sha>` to GHCR.
+  2. `azure/login` with `client-id`, `tenant-id` and `subscription-id` taken from **repository
+     variables** (not secrets; these are identifiers).
+  3. `az containerapp job update -n job-maa-detect -g rg-maa-env --image ghcr.io/…:<sha>`.
+- **No `environment:` key** on the deploy job. With one, the OIDC subject becomes
+  `repo:…:environment:<name>` and no longer matches the branch-restricted credential.
+- Pull requests never get `id-token: write`. Pull requests from forks get no secrets or OIDC
+  anyway.
+
+**Federated credential** (Bicep, `Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials`
+on `id-maa-github`):
+
+- issuer `https://token.actions.githubusercontent.com`
+- audience `api://AzureADTokenExchange`
+- subject `repo:XaverPilgrimm/market-anomaly-agent:ref:refs/heads/main`
+
+A token request from any other ref is refused (FR-008, SC-007). A user-assigned identity is used
+instead of an app registration, so everything stays in Bicep without Microsoft Graph.
+
+**Pipeline identity's permission**: a custom role **"Market Anomaly Agent job image updater"**
+(defined in Bicep at subscription scope, assigned at the scope of `job-maa-detect` only) with the
+actions `Microsoft.App/jobs/read` and `Microsoft.App/jobs/write`. It deliberately leaves out
+`Microsoft.App/jobs/start/action`: the jobs documentation warns that whoever can start a job can
+reference its secrets and identities through the start-template override. Check Q5 in
+quickstart.md verifies the role on the first pipeline run. If `az containerapp job update` turns out
+to also need `Microsoft.App/managedEnvironments/join/action` (on the environment) or
+`Microsoft.App/jobs/listSecrets/action` (which returns only the Key Vault reference, not the
+value), add exactly that action and record it.
+
+**Bicep ↔ pipeline drift**: the pipeline changes the job's image outside Bicep. `deploy.sh`
+therefore reads the image currently on the job (`az containerapp job show …`) and passes it as the
+`jobImage` parameter, so a redeploy never rolls the job back. On the very first deployment there is
+no image yet. `jobImage` then defaults to the public placeholder
+`mcr.microsoft.com/k8se/quickstart-jobs:latest`, and the owner runs
+`gh workflow run ci.yml --ref main` to publish and switch to the real image.
+
+## R8. TLS to the database
+
+**Decision**:
+
+- Server: the `require_secure_transport` parameter is set explicitly to `on` (the default, pinned
+  in Bicep so it cannot drift), and `ssl_min_protocol_version` to `TLSv1.2`.
+- Client in Azure: `DATABASE_URL` carries
+  `sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt`.
+- In Entra mode the application refuses to connect unless `sslmode=verify-full` is present
+  (FR-016).
+
+**Rationale**: the `psycopg[binary]` wheel bundles its own libpq and OpenSSL, whose built-in CA path
+need not match Debian's. `sslrootcert=system` could therefore fail or quietly use another store
+(*inference*), so the plan points to the Debian `ca-certificates` bundle explicitly. That bundle
+contains the public roots Azure Database for PostgreSQL uses (DigiCert Global Root G2 and Microsoft
+RSA Root CA 2017), and it is updated with the base image instead of being pinned in the repository.
+
+## R9. Failure alerting
+
+**Decision**: one action group (email to the deployment-time address), plus two scheduled query
+rules on the Log Analytics workspace:
+
+1. **Execution failed**: runs every 5 minutes over a 10-minute window. It looks for
+   `ContainerAppSystemLogs_CL` rows (or `ContainerAppSystemLogs`, whichever the workspace has) for
+   `job-maa-detect` that report a failed execution or a failed or timed-out replica. Each attempt's
+   failure fires it, so the owner may get up to 3 emails for one bad execution. FR-022 asks for at
+   least one; deduplicating is not worth the extra machinery. This rule meets SC-004 (within
+   15 minutes).
+2. **No completed run**: runs once a day at 12:45 UTC, Tuesday to Saturday. It fires when
+   `ContainerAppConsoleLogs_CL` holds no line containing `status=completed` from `job-maa-detect`
+   since 11:00 UTC that day. FR-002 makes even an "already stored" start print that line, so every
+   healthy scheduled day produces one. The rule catches whatever rule 1's reason strings miss: an
+   image that cannot be pulled, an unforeseen event name, a broken schedule.
+
+**Rationale**: Microsoft's pages document neither a job-failure metric nor the exact failure
+`Reason_s` values. Community guides show `Reason_s == "Completed"` for success and say failure
+reasons vary, and that a failure is sometimes marked only when the replica timeout is reached
+([azureossd troubleshooting](https://azureossd.github.io/2023/10/30/Troubleshooting-failed-job-executions-on-Container-App-Jobs),
+[practical guide: job execution history](https://yeongseon.github.io/azure-container-apps-practical-guide/troubleshooting/kql/dapr-and-jobs/job-execution-history)).
+Check Q4 in quickstart.md forces a failing execution, so the real reason strings and columns can
+be read from the workspace and set in the rule. Rule 2 guards against getting them wrong.
+
+**Alternatives considered**: Event Grid or a function app reacting to job events. Rejected: an
+extra service (Principle II).
+
+## R10. Monthly cost estimate and budget
+
+**Cap**: the constitution (v1.2.0, Principle V) sets the Azure cap at **EUR 30** per month. It is
+stated in EUR because Azure bills this subscription in EUR, so the budget compares like with like
+and needs no conversion. At about 1.12 USD per EUR (mid-market quotes from 6 to 9 November 2026,
+for example [exchange-rates.org](https://www.exchange-rates.org/converter/eur-usd)), EUR 30 is
+about USD 34. Together with the X API's USD 15 that is about USD 49, within the USD 50 total.
+
+**Decision**: a subscription-scope budget `budget-maa-monthly` of **EUR 30**. Notifications on
+**actual** cost at 50% (EUR 15), 80% (EUR 24) and 100% (EUR 30), sent to the deployment-time
+address. Azure's EUR list prices are set by Microsoft, not converted daily, so actual charges and
+the budget are both in EUR. The README states that budgets only notify and never stop spending
+(FR-028).
+
+The exchange rate is used only to convert the USD-quoted price estimates below. It does not affect
+the budget.
+
+**Estimate**, Germany West Central, pay-as-you-go list prices. These are estimates: the PostgreSQL
+figures come from third-party price trackers because Microsoft's calculator could not be read
+automatically. Check Q2 in quickstart.md re-prices them in the [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/)
+in EUR before the first deployment.
+
+| Resource | Basis | USD / month | EUR / month (×0.89 EUR per USD) |
+|---|---|---|---|
+| PostgreSQL Flexible Server, B1ms compute | 730 h, ~USD 15 in GWC ([bytebase dbcost](https://www.bytebase.com/dbcost/azure-flexible/instance/B1ms/)) | 15.00 | 13.35 |
+| PostgreSQL storage | 32 GiB minimum, ~USD 0.13/GiB | 4.20 | 3.74 |
+| PostgreSQL backup | 7-day retention; free up to 100% of provisioned storage | 0.00 | 0.00 |
+| Container Apps job (consumption) | 0.5 vCPU / 1 GiB. Worst case 22 days × 3 attempts × 14 min = 27,720 vCPU-s and 55,440 GiB-s, inside the free grant of 180,000 vCPU-s and 360,000 GiB-s per subscription | 0.00 | 0.00 |
+| Container Apps environment (consumption only) | No idle charge | 0.00 | 0.00 |
+| Log Analytics | < 0.2 GB/month ingested, inside the 5 GB free allowance; 30-day retention (free up to 31 days) | 0.00 | 0.00 |
+| Alert rule 1 (5-minute frequency) | ~USD 1.50 per rule | 1.50 | 1.34 |
+| Alert rule 2 (daily) | ~USD 0.50 per rule | 0.50 | 0.45 |
+| Action group email, budget | Free | 0.00 | 0.00 |
+| Key Vault Standard | ~1,000 operations, USD 0.03 per 10,000 | 0.01 | 0.01 |
+| Bandwidth | Image pull from GHCR is inbound (free); egress < 1 GB | 0.00 | 0.00 |
+| **Subtotal with GHCR (chosen)** | | **21.21** | **18.88** (63% of EUR 30) |
+| Azure Container Registry Basic (alternative) | ~USD 0.167/day | 5.00 | 4.45 |
+| **Subtotal with ACR** | | **26.21** | **23.33** (78% of EUR 30) |
+
+**Watch items**: Microsoft Defender for Cloud plans must stay off (they bill per resource). A
+General Purpose SKU, high availability or geo-redundant backup would each break the cap and are
+not used.
+
+## R11. Application changes (feature 001 code)
+
+| Concern | Decision | Rationale |
+|---|---|---|
+| New mode | `detect --latest`, mutually exclusive with `--date`, exactly one required. Day = `calendar.previous_trading_day(now_in(America/New_York).date())`. The clock is injected for tests. | Reuses the existing NASDAQ calendar (FR-001). |
+| Already-stored check | In `--latest` mode, after migrations and before reading the API key, the universe or any vendor call: `load_run(conn, day)`. If found, log INFO, print the stored summary, exit 0. | FR-002: no vendor request, no write, no false exit 3. |
+| Migrations | New flag `--migrate`, valid with either mode. It applies `apply_migrations` in the same process, inside the same scrubbed error handling. The job runs `detect --latest --migrate`. | FR-006. One process, so a migration error is redacted and exits 1 like any other error. `--date` without the flag behaves exactly as before. |
+| Start log | One INFO line: `start mode=<latest|date> evaluated_date=<d> version=<APP_COMMIT or "unknown">`. | FR-004. |
+| Version | `APP_COMMIT` is set in the image from build arg `GIT_SHA`, plus the label `org.opencontainers.image.revision`. | FR-005. |
+| Entra auth | `storage/db.py`: `DATABASE_AUTH=password` (default, unchanged) or `entra`. In `entra` mode, `DATABASE_URL` must have no password and must have `sslmode=verify-full`. The token comes from `azure.identity.ManagedIdentityCredential(client_id=$AZURE_CLIENT_ID)` for scope `https://ossrdbms-aad.database.windows.net/.default`, is passed as `password=` to `psycopg.connect`, and is registered with the scrubber. | FR-017a, FR-020, FR-023. Microsoft's Container Apps page says a user-assigned identity's client ID must be given explicitly to the Azure Identity library. |
+| Dependency | Add `azure-identity` to runtime dependencies. | It is the supported client: it finds the platform identity endpoint and caches tokens. Rejected: hand-written HTTP to `IDENTITY_ENDPOINT` (the docs do not state that jobs set it, and it means more code to own). |
+| Redaction | `cli._secrets()` also returns every access token issued in the process. | FR-023: a token is a credential for its lifetime. |
+
+## R12. Image
+
+**Decision**: a two-stage `Containerfile` at the repository root.
+
+- Build stage: `ghcr.io/astral-sh/uv:<pinned>-python3.12-bookworm-slim`, then
+  `uv sync --frozen --no-dev --no-editable`.
+- Runtime stage: `python:3.12-slim-bookworm` with `ca-certificates`, running as a non-root user.
+  `ENTRYPOINT ["detect"]`; the job passes `--latest --migrate` as its arguments.
+- `.containerignore` excludes `.env`, `.git`, `specs/`, `tests/` and caches (FR-005).
+
+The universe CSV is package data under `src/`, so it is copied into the image with the package.
+
+**Local use**: `podman build` and `podman run` work on the host for a smoke test (see
+quickstart.md). The daily image is only ever built by the pipeline.
+
+## R13. What-if before every real deployment
+
+**Decision**: all infrastructure is one subscription-scope deployment of `infra/main.bicep`, which
+creates both resource groups, the budget and the custom role. `deploy.sh` always runs
+`az deployment sub what-if` first and then `az deployment sub create --confirm-with-what-if`, so
+nothing is applied without the owner reading and confirming the diff. The first real deployment
+also requires a clean what-if (quickstart check Q6). Pull requests compile and lint the Bicep
+offline (R7).
+
+**CanNotDelete side effect**: a lock on a resource group "prevents Resource Manager from
+automatically deleting deployments in the history. If you reach 800 deployments in the history,
+your deployments fail." The data group receives one module deployment per `deploy.sh` run, so
+this is far away. The README notes how to prune the history if it is ever needed.
+
+## R14. Firewall rule for the owner under the lock
+
+**Decision**: there are two firewall rules on the server:
+
+- `AllowAllAzureServicesAndResourcesWithinAzureIps` (0.0.0.0–0.0.0.0, Microsoft's convention for
+  "allow Azure services")
+- `owner-access`
+
+`owner-access` is never deleted. `db-access.sh open` updates it to the owner's current public IP.
+`db-access.sh close` updates it to `192.0.2.1`, a reserved documentation address (RFC 5737
+TEST-NET-1) that is never routed on the internet. Every Bicep deployment resets it to closed.
+
+**Rationale**: the CanNotDelete lock on `rg-maa-data` is inherited by child resources ("When you
+apply a lock at a parent scope, all resources within that scope inherit the same lock"), so
+deleting a firewall rule would be refused (*inference* from the lock documentation). Updating a
+rule is allowed: "authorized users can read and modify a resource, but they can't delete it". The
+Azure-services rule admits any Azure tenant at the network level. That is accepted because
+password login is disabled and only Entra principals with a database role can connect (spec edge
+case).
+
+## R15. Commands run on the host only
+
+**Decision**: every `az`, `gh`, `psql`, `pg_dump` and `podman build` command in this feature is
+run by the owner on the host, never inside the agent container, and never by Claude Code. The
+scripts in `infra/scripts/` start by refusing to run in the agent container (they check
+`/run/.containerenv` and exit 1). `psql`, `pg_dump` and `pg_restore` are used from a
+`docker.io/library/postgres:17` container started with `podman run --rm` on the host, so no local
+client installation is needed. The only Azure sign-in outside the host is GitHub Actions through
+the OIDC federated credential (R7).

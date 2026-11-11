@@ -191,14 +191,14 @@ resources are expected to stay well under it.
 **Why this priority**: The resources are small, so overspending is unlikely, but the constitution
 requires the caps (Principle V), and an alert that only arrives with the invoice is too late.
 
-**Independent Test**: After deployment, confirm that a monthly budget of USD 30 exists for the
+**Independent Test**: After deployment, confirm that a monthly budget of EUR 30 exists for the
 project's Azure spending, with notifications at 50%, 80% and 100% addressed to the owner, and that
-the documented cost estimate of the deployed resources is below USD 30 per month.
+the documented cost estimate of the deployed resources is below EUR 30 per month.
 
 **Acceptance Scenarios**:
 
 1. **Given** a deployed environment, **When** the project's actual Azure spending in a month
-   reaches 50%, 80% or 100% of USD 30, **Then** the owner is notified at each threshold.
+   reaches 50%, 80% or 100% of EUR 30, **Then** the owner is notified at each threshold.
 2. **Given** the documentation, **When** the owner reads it, **Then** it states that Azure budgets
    only notify and do not stop spending.
 
@@ -373,10 +373,11 @@ the documented cost estimate of the deployed resources is below USD 30 per month
 
 **Cost**
 
-- **FR-028**: A monthly Azure budget of USD 30 MUST cover all of the project's Azure spending, with
+- **FR-028**: A monthly Azure budget of EUR 30 MUST cover all of the project's Azure spending, with
   notifications to the owner at 50%, 80% and 100% of actual spending (constitution Principle V).
+  The budget is set in EUR, the currency Azure bills this subscription in.
   The documentation MUST state that Azure budgets only notify and do not stop spending.
-- **FR-029**: The chosen resources MUST have a documented expected monthly cost below USD 30. The
+- **FR-029**: The chosen resources MUST have a documented expected monthly cost below EUR 30. The
   vendor cost stays USD 0 (free plan).
 
 ### Key Entities
@@ -412,7 +413,7 @@ the documented cost estimate of the deployed resources is below USD 30 per month
   environment within 1 hour, supplying only the vendor key and the notification address, and the
   next execution stores a trading day. Every day stored before the teardown is still stored
   afterwards.
-- **SC-006**: The documented expected Azure cost is below USD 30 per month, and the vendor cost is
+- **SC-006**: The documented expected Azure cost is below EUR 30 per month, and the vendor cost is
   USD 0.
 - **SC-007**: A search of the image, the repository, the pipeline's logs and the collected run logs
   does not find the vendor key, and an attempt to connect to the cloud database with a password
@@ -433,7 +434,7 @@ the documented cost estimate of the deployed resources is below USD 30 per month
 ## Assumptions
 
 - The owner has an Azure subscription used for this project, with the rights to create resources,
-  managed identities and role assignments. The USD 30 budget therefore covers the project's whole
+  managed identities and role assignments. The EUR 30 budget therefore covers the project's whole
   Azure spending, including Azure OpenAI once a later feature adds it.
 - The region is one EU region where every service of this feature is available, including
   Burstable B1ms with PostgreSQL 17. It is chosen in the plan.

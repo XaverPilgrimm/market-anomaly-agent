@@ -77,11 +77,11 @@ Monthly spending caps:
 
 | Provider | Monthly cap | Provider-side control |
 |---|---|---|
-| Azure, including Azure OpenAI once it is used | USD 30 | Azure budget alerts at 50%, 80% and 100%. Azure budgets only alert; they do not stop spending. |
+| Azure, including Azure OpenAI once it is used | EUR 30 (stated in EUR because Azure bills this subscription in EUR) | Azure budget alerts at 50%, 80% and 100%. Azure budgets only alert; they do not stop spending. |
 | X API | USD 15 | The hard spend limit in the X Developer Console |
 | Twelve Data | USD 0 | Free Basic plan |
 | Brave Search | USD 0 | Free plan |
-| **Total** | **USD 50** | |
+| **Total** | **USD 50** | EUR 30 is about USD 34 at the November 2026 rate (about 1.12 USD per EUR), so Azure plus the X API stays within USD 50 (about USD 49). |
 
 These provider-side controls do not replace the caps and rate limits enforced in code that this
 principle requires.
@@ -157,4 +157,4 @@ Compliance review: every pull request MUST be checked against these principles b
 Violations MUST be either fixed or recorded explicitly with a justification. Unresolved TODO
 placeholders in this document MUST be resolved before the first evaluation period begins.
 
-**Version**: 1.1.0 | **Ratified**: 2026-10-28 | **Last Amended**: 2026-11-11
+**Version**: 1.2.0 | **Ratified**: 2026-10-28 | **Last Amended**: 2026-11-11
