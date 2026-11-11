@@ -283,11 +283,50 @@ no image yet. `jobImage` then defaults to the public placeholder
 - In Entra mode the application refuses to connect unless `sslmode=verify-full` is present
   (FR-016).
 
-**Rationale**: the `psycopg[binary]` wheel bundles its own libpq and OpenSSL, whose built-in CA path
-need not match Debian's. `sslrootcert=system` could therefore fail or quietly use another store
-(*inference*), so the plan points to the Debian `ca-certificates` bundle explicitly. That bundle
-contains the public roots Azure Database for PostgreSQL uses (DigiCert Global Root G2 and Microsoft
-RSA Root CA 2017), and it is updated with the base image instead of being pinned in the repository.
+**Where libpq finds the CA certificates**: without `sslrootcert`, libpq reads
+`~/.postgresql/root.crt`, which the image does not have, so every `verify-full` connection would
+fail. The job's `DATABASE_URL` therefore always names the file. The two ways the owner proposed
+were checked on 2026-11-11:
+
+1. **`sslrootcert=system` does not work with the `psycopg[binary]` wheel.** With `system`, libpq
+   uses OpenSSL's default trust store. The wheel in use (psycopg 3.3.6, bundled libpq 18, OpenSSL
+   3.5.8 in `psycopg_binary.libs`) has OpenSSL compiled with `OPENSSLDIR: "/host/tmp/libpq.build"`,
+   a path on the wheel's build machine. Its default store would be looked up under that directory,
+   which does not exist in the image, so `system` would fail there (unless `SSL_CERT_FILE` were also
+   set, which would be the explicit path again by another route). This was checked by reading the
+   `OPENSSLDIR` string from the bundled `libcrypto`.
+2. **Shipping Microsoft's roots in the repository works, but it is not needed.** Microsoft
+   documents that the servers' certificates chain to **DigiCert Global Root G2** and **Microsoft
+   RSA Root CA 2017** (subject `Microsoft RSA Root Certificate Authority 2017`). It also says
+   clients should trust both and only roots, not intermediates
+   ([TLS in Azure Database for PostgreSQL](https://learn.microsoft.com/en-us/azure/postgresql/security/security-tls),
+   [configure TLS](https://learn.microsoft.com/en-us/azure/postgresql/security/security-tls-how-to-connect)).
+   Both roots are part of the Mozilla store that Debian's `ca-certificates` package installs as
+   `/etc/ssl/certs/ca-certificates.crt`. This was checked in an Ubuntu 24.04 bundle built from the
+   same store (`ca-certificates 20260601`): DigiCert Global Root G2 expires 2038-01-15 and Microsoft
+   RSA Root Certificate Authority 2017 expires 2042-07-18.
+
+**Decision**: use the system store, but name it by file. The image installs `ca-certificates` in
+its `python:3.12-slim-bookworm` runtime stage, and the job's `DATABASE_URL` carries
+`sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt`. libpq then loads exactly that
+file and does not depend on the bundled OpenSSL's compiled-in paths or on `~/.postgresql`. The
+bundle is refreshed with every image build, so a root rotation needs no repository change.
+
+**Guards**:
+
+- The image build fails unless that file loads with Python's `ssl` module and contains both
+  roots by subject name (tasks.md T016). A base image without them can never be published.
+- Quickstart check Q7 makes a real `verify-full` connection from the published image, plus a
+  negative connection that must fail without the bundle, so the test is known to check something.
+
+**Fallback**, if a future base image dropped either root: copy the two PEM files from Microsoft's
+documentation into the image as `/app/certs/azure-postgres-roots.pem` and point `sslrootcert` at
+that file. Roots only, never intermediates, as Microsoft advises.
+
+**Owner-side clients** (`psql`, `pg_dump` and `pg_restore` in the `postgres:17` container,
+deployment-contract.md §6) keep `sslrootcert=system`. That image's libpq is Debian's build, whose
+OpenSSL default store is `/usr/lib/ssl`, which points at `/etc/ssl/certs`. Their first use is
+`db-bootstrap.sh` (check Q7), which fails loudly if the store is missing.
 
 ## R9. Failure alerting
 

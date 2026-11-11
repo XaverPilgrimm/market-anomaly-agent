@@ -169,13 +169,13 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
 
 ### Implementation for User Story 1
 
-- [ ] T012 [P] [US1] Implement `latest_completed_trading_day(now: datetime) -> date` in `src/market_anomaly_agent/calendar.py`: raise `ValueError` if `now.tzinfo is None`, convert with `zoneinfo.ZoneInfo(_TZ)`, and return `previous_trading_day(ny_date)`. Makes T008 pass.
-- [ ] T013 [P] [US1] Implement Entra mode in `src/market_anomaly_agent/storage/db.py` per contracts/cli-contract.md (Environment) and data-model.md §1, making T009 pass:
+- [X] T012 [P] [US1] Implement `latest_completed_trading_day(now: datetime) -> date` in `src/market_anomaly_agent/calendar.py`: raise `ValueError` if `now.tzinfo is None`, convert with `zoneinfo.ZoneInfo(_TZ)`, and return `previous_trading_day(ny_date)`. Makes T008 pass.
+- [X] T013 [P] [US1] Implement Entra mode in `src/market_anomaly_agent/storage/db.py` per contracts/cli-contract.md (Environment) and data-model.md §1, making T009 pass:
   - The constants `AUTH_ENV_VAR`, `CLIENT_ID_ENV_VAR` and `ENTRA_SCOPE`.
   - A module-level `_issued: list[str]` and `issued_tokens() -> tuple[str, ...]`.
   - In `connect()`, read `DATABASE_AUTH`; unset or empty means `password` (`os.environ.get(AUTH_ENV_VAR) or "password"`). In `entra` mode, apply data-model.md §1's rules verbatim: "must have no password and must have `sslmode=verify-full`, otherwise exit 1 before connecting" (raise `DatabaseConfigError`), and require `AZURE_CLIENT_ID`. Then get a token with `ManagedIdentityCredential(client_id=…).get_token(ENTRA_SCOPE).token` (imported as `from azure.identity import ManagedIdentityCredential`), append it to `_issued`, and return `psycopg.connect(url, password=token, autocommit=True)`.
   - Never log the URL or the token. Update the module docstring.
-- [ ] T014 [US1] Update `src/market_anomaly_agent/cli.py` per contracts/cli-contract.md, making T010 pass:
+- [X] T014 [US1] Update `src/market_anomaly_agent/cli.py` per contracts/cli-contract.md, making T010 pass:
   - A required mutually exclusive argparse group of `--date` and `--latest`, plus `--migrate`.
   - The `now` keyword parameter.
   - Resolve the day with `calendar.latest_completed_trading_day(now())` for `--latest`; keep the trading-day check for `--date`.
@@ -184,10 +184,11 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - Then continue into `_run`.
   - `_secrets()` also returns every value of `db.issued_tokens()`.
   - Update the module docstring to name both modes. Exit codes are unchanged.
-- [ ] T015 [US1] Run `uv run pytest`, `uv run pytest -m integration` (local PostgreSQL via `podman compose`, as in feature 001), `uv run ruff check`, `uv run ruff format --check` and `uv run mypy`. Everything must pass, T011 included. Fix failures in the files of T012 to T014 only.
+- [X] T015 [US1] Run `uv run pytest`, `uv run pytest -m integration` (local PostgreSQL via `podman compose`, as in feature 001), `uv run ruff check`, `uv run ruff format --check` and `uv run mypy`. Everything must pass, T011 included. Fix failures in the files of T012 to T014 only.
 - [ ] T016 [P] [US1] Create `Containerfile` per research R12:
   - Stage `build` from `ghcr.io/astral-sh/uv:<version>-python3.12-bookworm-slim`, with `<version>` the exact uv release in use (`uv --version`, at least two weeks old). `WORKDIR /app`, copy `pyproject.toml`, `uv.lock`, `README.md` and `src/`, then `uv sync --frozen --no-dev --no-editable`.
   - Stage `runtime` from `python:3.12-slim-bookworm`: `apt-get install --no-install-recommends ca-certificates` and clean the apt lists, create user `app` (uid 10001), copy `/app/.venv` from `build`, and set `PATH=/app/.venv/bin:$PATH`.
+  - CA guard (research R8): right after installing `ca-certificates`, a `RUN` step fails the build unless `/etc/ssl/certs/ca-certificates.crt` contains both roots Microsoft documents for Azure Database for PostgreSQL: `python -c "import ssl; s={dict(x[0] for x in c['subject']).get('commonName') for c in ssl.create_default_context(cafile='/etc/ssl/certs/ca-certificates.crt').get_ca_certs()}; missing={'DigiCert Global Root G2','Microsoft RSA Root Certificate Authority 2017'}-s; assert not missing, missing"`. Do not set `PGSSLROOTCERT`, `SSL_CERT_FILE` or `SSL_CERT_DIR`: the job's `DATABASE_URL` names the file (`sslrootcert=/etc/ssl/certs/ca-certificates.crt`, T018), because `sslrootcert=system` does not find a store with the wheel's bundled OpenSSL.
   - `ARG GIT_SHA=unknown`, `ENV APP_COMMIT=$GIT_SHA`, and `LABEL org.opencontainers.image.revision=$GIT_SHA` and `org.opencontainers.image.source=https://github.com/XaverPilgrimm/market-anomaly-agent`.
   - `USER app`, `ENTRYPOINT ["detect"]`, no `CMD`.
   - No `ENV` with any secret (FR-005).
@@ -277,9 +278,10 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   Record the region and the real EUR prices in `specs/002-azure-daily-run/research.md` (R2, R10).
 - [ ] T028 [US1] (owner, host) Run the first deployment from quickstart.md §2:
   1. `infra/scripts/deploy.sh` (answer **y**), and set the three GitHub variables.
-  2. `infra/scripts/db-access.sh open`, `infra/scripts/db-bootstrap.sh` (must print `bootstrap ok`; this is check Q7, the first sign-in as `maa-db-admins`; on failure follow the work-account fallback in quickstart.md §2), `infra/scripts/db-access.sh close`.
+  2. `infra/scripts/db-access.sh open`, `infra/scripts/db-bootstrap.sh` (must print `bootstrap ok`; this is check Q7 part 1, the first sign-in as `maa-db-admins`; on failure follow the work-account fallback in quickstart.md §2), `infra/scripts/db-access.sh close`.
   3. `gh workflow run ci.yml --ref main`, then set the GHCR package `market-anomaly-agent` to public.
-  4. Check Q5: `publish-deploy` succeeds with the custom role only. If it fails with an authorization error, add exactly the missing action to the role in `infra/main.bicep`, record it in research R7, and redeploy.
+  4. Check Q7 part 2 (quickstart.md §2): with `db-access.sh open`, a `verify-full` connection from the published image using `sslrootcert=/etc/ssl/certs/ca-certificates.crt` succeeds and reports `ssl = true`, and the same connection with `sslrootcert=/dev/null` fails with a certificate error. Then `db-access.sh close`. On failure, apply the fallback in research R8.
+  5. Check Q5: `publish-deploy` succeeds with the custom role only. If it fails with an authorization error, add exactly the missing action to the role in `infra/main.bicep`, record it in research R7, and redeploy.
 - [ ] T029 [US1] (owner, host) Validate US1 per quickstart.md §4 rows US1-1/US1-2 and US1-3/US1-5/SC-010:
   - A manual `az containerapp job start -n job-maa-detect -g rg-maa-env` succeeds, its log shows the start line with the commit and the applied migration, and the owner query shows the day in `detection_runs`.
   - A pull request runs `checks` only.

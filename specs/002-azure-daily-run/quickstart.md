@@ -42,13 +42,40 @@ infra/scripts/db-access.sh close
 gh workflow run ci.yml --ref main  # first real image → job
 ```
 
-**Check Q7: admin sign-in through the group (research R16).** `db-bootstrap.sh` is the first
-sign-in as `maa-db-admins`. It must print `bootstrap ok`. If it fails with an authentication
+**Check Q7, part 1: admin sign-in through the group (research R16).** `db-bootstrap.sh` is the
+first sign-in as `maa-db-admins`. It must print `bootstrap ok`. If it fails with an authentication
 error (for example `password authentication failed for user "maa-db-admins"` or an
 invalid-token message), the server does not accept the personal account through the group. Then
 create a cloud-only work account in the tenant, add it to `maa-db-admins`, remove the personal
 account, sign in to `az` with the work account, and rerun `entra-bootstrap.sh` and
 `db-bootstrap.sh`. The server does not change.
+
+**Check Q7, part 2: a real `verify-full` connection from the job image (research R8).** The unit
+tests replace `psycopg.connect`, so only a real connection proves that the image's libpq finds the
+CA bundle. Run this after the first image has been published (the `gh workflow run` below), with
+`db-access.sh open`. `<sha>` is the published tag and `<server-fqdn>` comes from the `deploy.sh`
+output:
+
+```bash
+export PGPASSWORD="$(az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv)"
+IMAGE=ghcr.io/xaverpilgrimm/market-anomaly-agent:<sha>
+CHECK='import psycopg, sys
+conn = psycopg.connect(f"host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert={sys.argv[1]}")
+print(conn.execute("SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()").fetchone())'
+podman run --rm -e PGPASSWORD --entrypoint python "$IMAGE" -c "$CHECK" /etc/ssl/certs/ca-certificates.crt
+podman run --rm -e PGPASSWORD --entrypoint python "$IMAGE" -c "$CHECK" /dev/null
+unset PGPASSWORD
+```
+
+| Run | Pass condition |
+|---|---|
+| With `/etc/ssl/certs/ca-certificates.crt` (what the job uses) | Prints `(True, 'TLSv1.3')` or `(True, 'TLSv1.2')` |
+| With `/dev/null` (no trusted roots) | Fails with a certificate error, for example `certificate verify failed` or `could not read root certificate file`. This proves the first run really verified the server. |
+
+If the first run fails with a certificate error, switch to the fallback in research R8 (ship
+Microsoft's two roots as `/app/certs/azure-postgres-roots.pem`). The first scheduled or manual
+execution of the job (§4, US1-1) then confirms the same path end to end with the job's own
+identity.
 
 After the first push, set the GHCR package `market-anomaly-agent` to **public** once (package
 settings on GitHub). Without that step, the job cannot pull the image.

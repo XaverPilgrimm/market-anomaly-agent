@@ -3,8 +3,9 @@
 Only session dates matter here, so early-close sessions are ordinary trading days.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import cache
+from zoneinfo import ZoneInfo
 
 import pandas_market_calendars as mcal
 
@@ -49,3 +50,14 @@ def previous_trading_day(d: date) -> date:
 def fetch_window_start(d: date) -> date:
     """First day of the price window fetched for evaluated day `d`."""
     return trading_days_before(d, FETCH_LOOKBACK_DAYS)[0]
+
+
+def latest_completed_trading_day(now: datetime) -> date:
+    """The most recent trading day strictly before `now`'s calendar date in New York (002 FR-001).
+
+    A trading day's own date is never returned, even late in the evening, so a day is never
+    evaluated from bars that may still be provisional. `now` must be timezone-aware.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be a timezone-aware datetime")
+    return previous_trading_day(now.astimezone(ZoneInfo(_TZ)).date())

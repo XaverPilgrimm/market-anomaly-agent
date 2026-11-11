@@ -46,7 +46,10 @@ for infrastructure; Bash for the host-side operation scripts
 - Azure resource API versions are pinned in Bicep, `Microsoft.App/jobs@2026-07-01` (latest listed; GA).
 
 **Storage**: Azure Database for PostgreSQL Flexible Server, PostgreSQL 17, `Standard_B1ms`,
-32 GiB, 7-day backup, Entra-only authentication, TLS 1.2+ enforced and verified by the client.
+32 GiB, 7-day backup, Entra-only authentication, TLS 1.2+ enforced and verified by the client
+(`sslmode=verify-full`). The client trusts the image's Debian CA bundle, named by file
+(`sslrootcert=/etc/ssl/certs/ca-certificates.crt`). `sslrootcert=system` does not work with the
+`psycopg[binary]` wheel's bundled OpenSSL (research R8).
 Feature 001's schema and migrations are unchanged, and no new tables are added
 ([data-model.md](./data-model.md)).
 
