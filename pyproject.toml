@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Daily Nasdaq-100 anomaly detection. Experimental research project, not investment advice."
 requires-python = ">=3.12"
 dependencies = [
+    "azure-identity>=1.27.0",
     "numpy>=2.5.4",
     "pandas-market-calendars>=5.5.0",
     "psycopg[binary]>=3.3.6",

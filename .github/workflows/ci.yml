@@ -1,0 +1,63 @@
+# Checks on every pull request to main and every push to main (spec FR-007).
+# Design: specs/002-azure-daily-run/contracts/deployment-contract.md §5 and research.md R7.
+#
+# The `checks` job never signs in to Azure. Publishing the image and updating the job
+# (`publish-deploy`, tasks.md T026) run only for main, after `checks` passes.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Throwaway CI-only value for the service container; not a credential for anything real.
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format check
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Unit tests (network blocked)
+        run: uv run pytest
+
+      - name: Integration tests (PostgreSQL 17)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: uv run pytest -m integration
+
+      - name: Bicep build (offline, no Azure sign-in)
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null

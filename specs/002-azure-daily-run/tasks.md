@@ -83,9 +83,9 @@ These are fixed here so no task has to decide them during implementation:
 
 **Purpose**: dependencies, ignore files and directory skeleton
 
-- [ ] T001 Add `azure-identity` as a runtime dependency with `uv add azure-identity`, which updates `pyproject.toml` and `uv.lock`. Check that `uv run mypy` still passes; `azure-identity` ships type information, so no mypy override should be needed. If it is, add one to the `[[tool.mypy.overrides]]` section of `pyproject.toml`.
-- [ ] T002 [P] Append `*.dump` to `.gitignore` (decommission exports, FR-031), and create the empty directories `infra/modules/`, `infra/sql/` and `infra/scripts/`, each with a `.gitkeep` until its first file exists.
-- [ ] T003 [P] Create `.containerignore` excluding `.env`, `.env.*` (but not `.env.example`), `.git/`, `.github/`, `specs/`, `tests/`, `infra/`, `.venv/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/`, `*.dump` and `.claude/` (FR-005: no secret or environment file in the image).
+- [X] T001 Add `azure-identity` as a runtime dependency with `uv add azure-identity`, which updates `pyproject.toml` and `uv.lock`. Check that `uv run mypy` still passes; `azure-identity` ships type information, so no mypy override should be needed. If it is, add one to the `[[tool.mypy.overrides]]` section of `pyproject.toml`.
+- [X] T002 [P] Append `*.dump` to `.gitignore` (decommission exports, FR-031), and create the empty directories `infra/modules/`, `infra/sql/` and `infra/scripts/`, each with a `.gitkeep` until its first file exists.
+- [X] T003 [P] Create `.containerignore` excluding `.env`, `.env.*` (but not `.env.example`), `.git/`, `.github/`, `specs/`, `tests/`, `infra/`, `.venv/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/`, `*.dump` and `.claude/` (FR-005: no secret or environment file in the image).
 
 ---
 
@@ -96,16 +96,16 @@ script, and the CI checks every later change is validated by
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Create `infra/scripts/_common.sh`, sourced by every script. It does three things. (1) `set -euo pipefail`. (2) It exits 1 with `run this on the host, not inside a container (research R15)` if `/run/.containerenv` or `/.dockerenv` exists. (3) It defines `require_az_login` (runs `az account show` and exits 1 with a clear message if that fails), `repo_root` (the git top level) and `pg_client` (`podman run --rm -i -e PGPASSWORD --network host docker.io/library/postgres:17 "$@"`). Make it non-executable; it is only sourced.
-- [ ] T005 Create `infra/main.bicep` with `targetScope = 'subscription'`:
+- [X] T004 Create `infra/scripts/_common.sh`, sourced by every script. It does three things. (1) `set -euo pipefail`. (2) It exits 1 with `run this on the host, not inside a container (research R15)` if `/run/.containerenv` or `/.dockerenv` exists. (3) It defines `require_az_login` (runs `az account show` and exits 1 with a clear message if that fails), `repo_root` (the git top level) and `pg_client` (`podman run --rm -i -e PGPASSWORD --network host docker.io/library/postgres:17 "$@"`). Make it non-executable; it is only sourced.
+- [X] T005 Create `infra/main.bicep` with `targetScope = 'subscription'`:
   - The parameters from contracts/deployment-contract.md §2: `location`, `githubRepository`, `dbAdminGroupName` (default `'maa-db-admins'`), `dbAdminGroupObjectId`, `alertEmail`, `@secure() twelveDataApiKey` (default `''`), `jobImage`, `ownerAccessIp` (default `'192.0.2.1'`), `budgetAmountEur` (default `30`), `jobReplicaTimeoutSeconds` (default `3600`), and `budgetStartDate` (default `'2026-11-01'`).
   - The two resource groups `rg-maa-data` and `rg-maa-env` in `location`.
   - Module calls to `modules/data.bicep` (scope `rg-maa-data`) and `modules/env.bicep` (scope `rg-maa-env`), with env.bicep receiving data.bicep's outputs.
   - The outputs `AZURE_CLIENT_ID` (id-maa-github client ID), `AZURE_TENANT_ID` (`tenant().tenantId`), `AZURE_SUBSCRIPTION_ID` (`subscription().subscriptionId`), `serverFqdn` and `jobName`.
 
   Create both modules as compiling stubs with those params and outputs, so `az bicep build --file infra/main.bicep` succeeds.
-- [ ] T006 [P] Create `infra/main.bicepparam` with `using 'main.bicep'` and only non-secret defaults: `location = 'germanywestcentral'`, `githubRepository = 'XaverPilgrimm/market-anomaly-agent'`, `budgetAmountEur = 30`, `budgetStartDate = '2026-11-01'`. It MUST NOT contain the alert email, any tenant ID, subscription ID or object ID, any tenant domain, any IP address or the vendor key (FR-018, FR-022, FR-025). Add a header comment saying so.
-- [ ] T007 Create the `checks` job in `.github/workflows/ci.yml`:
+- [X] T006 [P] Create `infra/main.bicepparam` with `using 'main.bicep'` and only non-secret defaults: `location = 'germanywestcentral'`, `githubRepository = 'XaverPilgrimm/market-anomaly-agent'`, `budgetAmountEur = 30`, `budgetStartDate = '2026-11-01'`. It MUST NOT contain the alert email, any tenant ID, subscription ID or object ID, any tenant domain, any IP address or the vendor key (FR-018, FR-022, FR-025). Add a header comment saying so.
+- [X] T007 Create the `checks` job in `.github/workflows/ci.yml`:
   - Triggers `pull_request` (branches `[main]`), `push` (branches `[main]`) and `workflow_dispatch`.
   - Top-level `permissions: contents: read`.
   - Job `checks` on `ubuntu-24.04` with a `postgres:17` service container (`POSTGRES_PASSWORD: postgres`, health check `pg_isready`, port 5432) and env `DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres` (a throwaway CI-only value, not a credential).
@@ -253,6 +253,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - First run `infra/scripts/entra-bootstrap.sh`, and stop if it fails.
   - `dbAdminGroupObjectId` from `az ad group show --group maa-db-admins --query id -o tsv`, at run time.
   - Alert email from `$MAA_ALERT_EMAIL`, or `read -r` if unset.
+  - Refuse to deploy (exit 1, before the what-if) when `dbAdminGroupObjectId` or the alert email is empty. `infra/main.bicepparam` sets both to `''` only because a parameter file must give a value for every required parameter, so an empty value always means the run-time lookup or the prompt failed.
   - Vendor key from `read -rs`; empty keeps the stored secret.
   - `jobImage` from `az containerapp job show -n job-maa-detect -g rg-maa-env --query "properties.template.containers[0].image" -o tsv`, falling back to the placeholder when the job does not exist.
   - Run `az deployment sub what-if -l <location> -n maa-<timestamp> -f infra/main.bicep -p infra/main.bicepparam -p dbAdminGroupObjectId=… alertEmail=… jobImage=… twelveDataApiKey="$KEY"`.
