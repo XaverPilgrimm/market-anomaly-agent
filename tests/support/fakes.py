@@ -90,13 +90,19 @@ def benchmark_bars() -> list[DailyBar]:
 
 
 class FakeSource:
+    """Serves `bars`, which tests may edit to cut history or drop days; a ticker in `raises`
+    gets that exception instead of bars."""
+
     def __init__(self, specs: dict[str, StockSpec]) -> None:
         self.bars = {ticker: stock_bars(spec) for ticker, spec in specs.items()}
         self.bars[BENCHMARK_TICKER] = benchmark_bars()
+        self.raises: dict[str, Exception] = {}
         self.calls: list[tuple[str, date, date]] = []
 
     def get_daily_bars(self, ticker: str, start: date, end: date) -> list[DailyBar]:
         self.calls.append((ticker, start, end))
+        if ticker in self.raises:
+            raise self.raises[ticker]
         return [b for b in self.bars[ticker] if start <= b.trading_date <= end]
 
 
