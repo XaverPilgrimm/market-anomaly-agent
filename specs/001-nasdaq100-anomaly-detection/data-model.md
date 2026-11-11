@@ -56,7 +56,7 @@ Each run therefore computes only from its own fresh fetch and stores that whole 
 | `close` | `NUMERIC NOT NULL` | adjusted for splits and dividends; this is the value FR-005's return is computed from |
 | `volume` | `NUMERIC NOT NULL` | |
 | `source` | `TEXT NOT NULL` | price-data vendor identifier, for provenance |
-| `fetched_at` | `TIMESTAMPTZ NOT NULL` | when this bar was retrieved |
+| `fetched_at` | `TIMESTAMPTZ NOT NULL` | the detection run's `computed_at`; every bar of a run is fetched during that run, so the run's timestamp stands in for the retrieval time |
 
 **Primary key**: `(evaluated_date, ticker, trading_date)`. **Validation rule**: rows are never
 updated or deleted — this is what makes the FR-018 reject-on-mismatch check possible: when a run

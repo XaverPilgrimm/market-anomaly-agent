@@ -12,6 +12,7 @@ The price history is constructed so the market-model numbers are known exactly:
 - On D the benchmark return is 0.005 and the stock return is alpha + beta * 0.005 + abnormal.
 """
 
+import dataclasses
 import math
 import re
 from collections.abc import Sequence
@@ -23,7 +24,7 @@ import pytest
 
 from market_anomaly_agent.calendar import fetch_window_start, trading_days_between
 from market_anomaly_agent.data.source import DailyBar
-from market_anomaly_agent.detection import DetectionResult, run_detection
+from market_anomaly_agent.detection import DetectionResult, run_detection, snapshots_match
 from market_anomaly_agent.rules import BENCHMARK_TICKER, RULE_VERSION
 
 D = date(2026, 10, 27)
@@ -220,3 +221,81 @@ def test_same_input_gives_equal_results() -> None:
     second, _ = run(US1_SPECS)
 
     assert first == second
+
+
+# --- snapshots_match (T029, FR-018) -------------------------------------------------------------
+
+
+def snapshot() -> dict[str, list[DailyBar]]:
+    prev = DAYS[-2]
+    return {
+        "AAA": [
+            DailyBar(prev, Decimal("101.25"), Decimal("102.50"), 1_200_000),
+            DailyBar(D, Decimal("102.60"), Decimal("103.40"), 2_900_000),
+        ],
+        BENCHMARK_TICKER: [
+            DailyBar(prev, Decimal("480.10"), Decimal("481.00"), 30_000_000),
+            DailyBar(D, Decimal("481.20"), Decimal("482.50"), 31_000_000),
+        ],
+    }
+
+
+def test_snapshots_match_when_values_are_equal() -> None:
+    stored = snapshot()
+    fetched = {t: tuple(bars) for t, bars in snapshot().items()}
+
+    assert snapshots_match(stored, fetched)
+
+
+def test_snapshots_match_compares_decimal_values_not_their_spelling() -> None:
+    fetched = snapshot()
+    fetched["AAA"][0] = dataclasses.replace(fetched["AAA"][0], close=Decimal("102.500"))
+
+    assert snapshots_match(snapshot(), fetched)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        DailyBar(DAYS[-2], Decimal("101.26"), Decimal("102.50"), 1_200_000),
+        DailyBar(DAYS[-2], Decimal("101.25"), Decimal("102.49"), 1_200_000),
+        DailyBar(DAYS[-2], Decimal("101.25"), Decimal("102.50"), 1_200_001),
+    ],
+    ids=["open", "close", "volume"],
+)
+def test_snapshots_differ_on_any_changed_value(changed: DailyBar) -> None:
+    fetched = snapshot()
+    fetched["AAA"][0] = changed
+
+    assert not snapshots_match(snapshot(), fetched)
+
+
+def test_snapshots_differ_on_a_missing_bar() -> None:
+    fetched = snapshot()
+    del fetched["AAA"][0]
+
+    assert not snapshots_match(snapshot(), fetched)
+
+
+def test_snapshots_differ_on_an_extra_bar() -> None:
+    fetched = snapshot()
+    fetched["AAA"].insert(0, DailyBar(DAYS[-3], Decimal(100), Decimal("101.25"), 900_000))
+
+    assert not snapshots_match(snapshot(), fetched)
+
+
+def test_snapshots_differ_on_a_moved_trading_date() -> None:
+    fetched = snapshot()
+    fetched["AAA"][0] = dataclasses.replace(fetched["AAA"][0], trading_date=DAYS[-3])
+
+    assert not snapshots_match(snapshot(), fetched)
+
+
+def test_snapshots_differ_on_a_missing_or_extra_ticker() -> None:
+    fewer = snapshot()
+    del fewer["AAA"]
+    more = snapshot()
+    more["BBB"] = list(more["AAA"])
+
+    assert not snapshots_match(snapshot(), fewer)
+    assert not snapshots_match(snapshot(), more)
