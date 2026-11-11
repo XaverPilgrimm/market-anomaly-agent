@@ -9,6 +9,7 @@ import argparse
 import logging
 import os
 import sys
+import traceback
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -136,8 +137,9 @@ def main(
         log.error("price data unavailable, nothing stored: %s", _scrub(str(exc)))
         return EXIT_ERROR
     except Exception as exc:  # noqa: BLE001 - contract: any other failure exits 1
-        # No traceback: frames and arguments could carry secrets.
         log.error("unexpected %s, nothing stored: %s", type(exc).__name__, _scrub(str(exc)))
+        # Formatted here rather than via exc_info, so the traceback passes through _scrub too.
+        log.error("traceback:\n%s", _scrub("".join(traceback.format_exception(exc))).rstrip())
         return EXIT_ERROR
 
 

@@ -247,7 +247,9 @@ def test_unexpected_error_exits_1_without_leaking_secrets(
     fakes: Fakes, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    fakes.detect_error = RuntimeError(f"boom using {API_KEY} against {DATABASE_URL}")
+    fakes.detect_error = RuntimeError(
+        f"boom using {API_KEY} against {DATABASE_URL} (password SECRET-db-pw)"
+    )
 
     assert cli.main(["--date", "2026-10-27"]) == 1
 
@@ -257,6 +259,16 @@ def test_unexpected_error_exits_1_without_leaking_secrets(
     for secret in (API_KEY, DATABASE_URL, "SECRET-db-pw"):
         assert all(secret not in text for text in outputs)
     assert "RuntimeError" in captured.err + caplog.text
+
+    tracebacks = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "Traceback (most recent call last)" in r.getMessage()
+    ]
+    assert len(tracebacks) == 1
+    assert "in run_detection" in tracebacks[0]  # the frame that raised, in tests' Fakes
+    assert tracebacks[0].endswith("RuntimeError: boom using *** against *** (password ***)")
+    assert "Traceback (most recent call last)" in captured.err
 
 
 def test_missing_api_key_exits_1_naming_the_variable(

@@ -1,5 +1,5 @@
 """quickstart.md scenarios 1-3 in-process: `cli.main` against a real local PostgreSQL, with a
-fixture universe file and the fake price source from the detection unit tests."""
+fixture universe file and the shared fake price source from tests/support/fakes.py."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -9,7 +9,7 @@ import pytest
 
 from market_anomaly_agent import cli
 from market_anomaly_agent.data.source import PriceDataSource
-from tests.unit.test_detection import DAYS, US1_SPECS, D, FakeSource
+from tests.support.fakes import DAYS, US1_SPECS, D, FakeSource
 
 Conn = psycopg.Connection[tuple[object, ...]]
 
