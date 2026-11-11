@@ -4,6 +4,7 @@ The fixture history and its exact market-model numbers are described in tests/su
 """
 
 import dataclasses
+import logging
 import math
 import re
 from collections.abc import Callable
@@ -489,3 +490,46 @@ def test_price_data_error_propagates_unchanged(ticker: str) -> None:
         run_detection(D, list(specs), source, NOW)
 
     assert info.value is error
+
+
+# --- progress logging (T053) ---------------------------------------------------------------------
+
+
+def detection_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "market_anomaly_agent.detection" and r.levelno == logging.INFO
+    ]
+
+
+def test_logs_the_run_start_then_every_fetch_with_its_position(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="market_anomaly_agent")
+
+    run(US1_SPECS)
+
+    messages = detection_messages(caplog)
+    assert messages[0] == f"evaluating {D.isoformat()}: 4 tickers plus benchmark {BENCHMARK_TICKER}"
+    order = [BENCHMARK_TICKER, "AAA", "BBB", "CCC", "FLAG"]
+    assert [m for m in messages if m.startswith("fetched ")] == [
+        f"fetched {t} ({k} of 5)" for k, t in enumerate(order, 1)
+    ]
+
+
+def test_an_unavailable_ticker_keeps_the_fetch_count_consecutive(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="market_anomaly_agent")
+    specs = {"GONE": FILLER, **fillers(9)}
+    source = FakeSource(specs)
+    source.raises["GONE"] = PriceDataUnavailable("GONE: symbol not found")
+
+    run_detection(D, list(specs), source, NOW)
+
+    fetched = [m for m in detection_messages(caplog) if m.startswith("fetched ")]
+    assert fetched == [
+        f"fetched {t} ({k} of 11)" + (": no data" if t == "GONE" else "")
+        for k, t in enumerate([BENCHMARK_TICKER, "GONE", *sorted(fillers(9))], 1)
+    ]

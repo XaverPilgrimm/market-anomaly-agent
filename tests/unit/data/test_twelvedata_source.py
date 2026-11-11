@@ -291,3 +291,22 @@ def test_api_key_never_appears_in_errors_or_logs(caplog: pytest.LogCaptureFixtur
 
     assert API_KEY not in str(excinfo.value)
     assert all(API_KEY not in record.getMessage() for record in caplog.records)
+
+
+def test_every_wait_before_a_retry_is_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """T053 (4): the reason and the wait in seconds, never the API key."""
+    caplog.set_level(logging.DEBUG)
+    limited = FakeResponse(200, {"status": "error", "code": 429, "message": "rate limit"})
+    source, _, _ = make_source(
+        [FakeResponse(503, {}), requests.Timeout("read timed out"), limited, ok_response([])]
+    )
+
+    source.get_daily_bars("AAPL", date(2026, 10, 27), date(2026, 10, 27))
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "AAPL: HTTP 503, retrying in 2 s",
+        "AAPL: Timeout, retrying in 4 s",
+        "AAPL: rate limited, retrying in 60 s",
+    ]
+    assert all(API_KEY not in record.getMessage() for record in caplog.records)

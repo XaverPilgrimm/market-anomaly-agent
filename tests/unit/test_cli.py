@@ -280,3 +280,30 @@ def test_missing_api_key_exits_1_naming_the_variable(
 
     assert fakes.detect_calls == []
     assert "PRICE_DATA_API_KEY" in capsys.readouterr().err
+
+
+def test_progress_logs_go_to_stderr_and_stdout_is_only_the_summary(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T053 (1): INFO is on by default; progress never reaches stdout."""
+
+    def detect_with_progress(
+        evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, now: datetime
+    ) -> DetectionResult:
+        logging.getLogger("market_anomaly_agent.detection").info("fetched AAA (2 of 3)")
+        logging.getLogger("market_anomaly_agent.data.twelvedata_source").warning(
+            "BBB: HTTP 503, retrying in 2 s"
+        )
+        return fakes.run_detection(evaluated_date, tickers, source, now)
+
+    monkeypatch.setattr(cli, "run_detection", detect_with_progress)
+
+    assert cli.main(["--date", "2026-10-27"]) == 0
+
+    captured = capsys.readouterr()
+    assert "INFO market_anomaly_agent.detection: fetched AAA (2 of 3)" in captured.err
+    assert (
+        "WARNING market_anomaly_agent.data.twelvedata_source: BBB: HTTP 503, retrying in 2 s"
+        in captured.err
+    )
+    assert captured.out == SUMMARY + "\n"

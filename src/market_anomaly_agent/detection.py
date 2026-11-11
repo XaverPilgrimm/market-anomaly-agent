@@ -133,13 +133,22 @@ def run_detection(
     days = trading_days_between(start, evaluated_date)
     estimation_days = days[:-1]
     return_days = days[-2:]  # a return on D needs the bars of D and the previous trading day
+    fetch_count = len(tickers) + 1  # the benchmark is fetched first
+    log.info(
+        "evaluating %s: %d tickers plus benchmark %s",
+        evaluated_date.isoformat(),
+        len(tickers),
+        BENCHMARK_TICKER,
+    )
 
     try:
         benchmark_bars = tuple(source.get_daily_bars(BENCHMARK_TICKER, start, evaluated_date))
     except PriceDataUnavailable as exc:
+        log.info("fetched %s (1 of %d): no data", BENCHMARK_TICKER, fetch_count)
         raise BenchmarkUnavailableError(
             f"benchmark {BENCHMARK_TICKER} is unavailable from the price source: {exc}"
         ) from exc
+    log.info("fetched %s (1 of %d)", BENCHMARK_TICKER, fetch_count)
     gap = _missing_day(benchmark_bars, return_days)
     if gap is not None:
         raise BenchmarkUnavailableError(
@@ -153,12 +162,14 @@ def run_detection(
     records: dict[str, EvaluatedRecord] = {}
     scores: dict[str, float] = {}
     skipped: list[SkippedRecord] = []
-    for ticker in sorted(tickers):
+    for position, ticker in enumerate(sorted(tickers), 2):
         try:
             ticker_bars = tuple(source.get_daily_bars(ticker, start, evaluated_date))
         except PriceDataUnavailable as exc:
+            log.info("fetched %s (%d of %d): no data", ticker, position, fetch_count)
             skipped.append(_skip(ticker, "missing_data", f"no data from the price source: {exc}"))
             continue
+        log.info("fetched %s (%d of %d)", ticker, position, fetch_count)
         if ticker_bars:  # no key for no bars, matching a snapshot read back from storage
             bars[ticker] = ticker_bars
         gap = _missing_day(ticker_bars, return_days)

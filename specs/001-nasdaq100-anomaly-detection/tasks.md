@@ -259,6 +259,17 @@ has no bar on the evaluated day, and the rest are complete: the first and third 
 
 ---
 
+## Phase 5b: Progress logging (constitution Principle VII, observability)
+
+**Purpose**: A run takes about 13 minutes at the vendor's rate limit; the operator must be able
+to see from stderr that it is progressing, which ticker it is on, and when the adapter is waiting
+to retry. The new task takes the next free ID (T053, after T052) instead of renumbering. stdout is
+unchanged: its last line is still the key=value summary (contracts/cli-contract.md).
+
+- [X] T053 Test-first (write the tests, see them fail, then implement; depends on T030, T040 and T052): (1) `src/market_anomaly_agent/cli.py` configures the `market_anomaly_agent` logger at INFO with its stderr handler, so INFO lines from every module appear on stderr by default; test in `tests/unit/test_cli.py` that INFO and WARNING records logged by `market_anomaly_agent.detection` and `market_anomaly_agent.data.twelvedata_source` during a run reach stderr and stdout is exactly the summary line. (2) At the start of a run, `run_detection` logs one INFO line `evaluating <YYYY-MM-DD>: <n> tickers plus benchmark <BENCHMARK_TICKER>`. (3) After each fetch, benchmark first and then the tickers in sorted order, it logs an INFO line `fetched <TICKER> (<k> of <n + 1>)`, e.g. `fetched AAPL (12 of 101)`; a fetch that raises `PriceDataUnavailable` still gets its line, with the suffix `: no data`, so the count stays consecutive; tests in `tests/unit/test_detection.py` with `caplog`. (4) `TwelveDataPriceDataSource` logs a WARNING each time it waits before a retry, naming the ticker, the reason and the wait in whole seconds (`<TICKER>: <reason>, retrying in <s> s`) and never the API key; test in `tests/unit/data/test_twelvedata_source.py` with `caplog` over an HTTP 503, a timeout and a code-429 error body (waits 2, 4 and 60 s)
+
+---
+
 ## Phase 6: Polish & Cross-Cutting Concerns
 
 **Purpose**: Checks that cover the whole feature
@@ -303,6 +314,7 @@ has no bar on the evaluated day, and the rest are complete: the first and third 
 - US1: tests T016–T022 together; then T023–T026 together; then T027, T028 (different files) together; then T029, T030, T031 in order.
 - US2: T032 and T033 together; T036 any time.
 - US3: T038 and T039 touch the same test file, so write them one after the other.
+- Phase 5b: T053 alone, after T040 (it edits `detection.py`, `cli.py` and the adapter).
 
 ---
 
