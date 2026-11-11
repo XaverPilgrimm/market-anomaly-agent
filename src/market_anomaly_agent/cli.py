@@ -25,12 +25,18 @@ from market_anomaly_agent.storage.repository import (
     StoredRun,
     load_bar_snapshot,
     load_run,
+    load_universe_once,
     save_run,
 )
-from market_anomaly_agent.universe.constituents import find_universe_file, read_universe_file
+from market_anomaly_agent.universe.constituents import (
+    find_universe_file,
+    read_universe_file,
+    validate_universe,
+)
 
 API_KEY_VAR = "PRICE_DATA_API_KEY"
 UNIVERSE_DIR = Path(__file__).parent / "universe"
+EXPECTED_UNIVERSE_SIZE = 100  # rows in the committed Nasdaq-100 snapshot (FR-001, FR-002)
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -75,7 +81,16 @@ def _scrub(text: str) -> str:
 
 
 def load_universe_tickers() -> list[str]:
-    return [c.ticker for c in read_universe_file(find_universe_file(UNIVERSE_DIR))]
+    """Read and validate the committed universe file (FR-001, FR-002), check it against the
+    frozen table, loading it on the first run (FR-003), and return its tickers.
+
+    Runs before any price data is fetched, so a bad or changed file fails fast.
+    """
+    constituents = read_universe_file(find_universe_file(UNIVERSE_DIR))
+    validate_universe(constituents, expected_count=EXPECTED_UNIVERSE_SIZE)
+    with connect() as conn:
+        load_universe_once(conn, constituents)
+    return [c.ticker for c in constituents]
 
 
 def _summary(evaluated_date: date, flagged: int, evaluated: int, skipped: int, rule: str) -> str:

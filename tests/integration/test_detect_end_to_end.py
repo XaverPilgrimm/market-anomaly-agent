@@ -9,7 +9,7 @@ import pytest
 
 from market_anomaly_agent import cli
 from market_anomaly_agent.data.source import PriceDataSource
-from tests.support.fakes import DAYS, US1_SPECS, D, FakeSource
+from tests.support.fakes import DAYS, GOOGL_SPEC, US1_SPECS, D, FakeSource, write_universe_file
 
 Conn = psycopg.Connection[tuple[object, ...]]
 
@@ -20,24 +20,27 @@ TABLES = (
     "anomaly_cases",
     "skipped_stock_records",
 )
+ALL_TABLES = (*TABLES, "universe_constituents")
 ARGV = ["--date", D.isoformat()]
+SPECS = {**US1_SPECS, "GOOGL": GOOGL_SPEC}  # the fixture universe always includes GOOGL
 SUMMARY = (
-    f"evaluated_date={D.isoformat()} status=completed flagged=1 evaluated=4 skipped=0 "
+    f"evaluated_date={D.isoformat()} status=completed flagged=1 evaluated=5 skipped=0 "
     "rule_version=1"
 )
 
 
-def write_universe(directory: Path, tickers: list[str]) -> None:
-    lines = ["ticker,company_name,snapshot_date,source,share_class_note"]
-    lines += [f"{t},{t} Inc.,2026-10-01,https://example.test/holdings.csv," for t in tickers]
-    (directory / "nasdaq100_2026-10-01.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def table_contents(conn: Conn) -> dict[str, list[tuple[object, ...]]]:
+def table_contents(
+    conn: Conn, tables: tuple[str, ...] = TABLES
+) -> dict[str, list[tuple[object, ...]]]:
     return {
         table: conn.execute(f"SELECT * FROM {table} ORDER BY 1, 2".encode()).fetchall()
-        for table in TABLES
+        for table in tables
     }
+
+
+@pytest.fixture
+def source() -> FakeSource:
+    return FakeSource(SPECS)
 
 
 @pytest.fixture
@@ -45,6 +48,7 @@ def detect(
     migrated_conn: Conn,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    source: FakeSource,
 ) -> Callable[[], int]:
     """`cli.main` for D, writing to the test's schema and reading the fixture universe."""
     row = migrated_conn.execute("SELECT current_schema()").fetchone()
@@ -58,11 +62,11 @@ def detect(
             url, password=password, autocommit=True, options=f"-c search_path={schema}"
         )
 
-    write_universe(tmp_path, sorted(US1_SPECS))
+    size = write_universe_file(tmp_path, sorted(SPECS))
     monkeypatch.setattr(cli, "UNIVERSE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "EXPECTED_UNIVERSE_SIZE", size)
     monkeypatch.setattr(cli, "connect", connect)
     monkeypatch.setenv("PRICE_DATA_API_KEY", "test-key")
-    source = FakeSource(US1_SPECS)
 
     def factory(api_key: str) -> PriceDataSource:
         return source
@@ -88,10 +92,12 @@ def test_first_run_stores_the_day(
     assert capsys.readouterr().out.strip().splitlines()[-1] == SUMMARY
     contents = table_contents(migrated_conn)
     assert runs_for_d(migrated_conn) == 1
-    assert len(contents["daily_price_bars"]) == 5 * 122  # 4 stocks + QQQ, full window each
-    assert [str(r[1]) for r in contents["evaluated_stock_records"]] == sorted(US1_SPECS)
+    assert len(contents["daily_price_bars"]) == 6 * 122  # 5 stocks + QQQ, full window each
+    assert [str(r[1]) for r in contents["evaluated_stock_records"]] == sorted(SPECS)
     assert [(str(r[1]), r[2]) for r in contents["anomaly_cases"]] == [("FLAG", 1)]
     assert contents["skipped_stock_records"] == []
+    frozen = migrated_conn.execute("SELECT ticker FROM universe_constituents ORDER BY 1")
+    assert [str(r[0]) for r in frozen.fetchall()] == sorted(SPECS)
 
 
 @pytest.mark.integration
@@ -133,3 +139,59 @@ def test_rerun_after_a_stored_bar_changed_is_rejected(
     assert captured.out == ""
     assert D.isoformat() in captured.err
     assert table_contents(migrated_conn) == before
+
+
+UNIVERSE_FILE = "nasdaq100_2026-10-01.csv"
+
+
+@pytest.mark.integration
+def test_invalid_universe_file_exits_1_before_fetching(
+    detect: Callable[[], int],
+    migrated_conn: Conn,
+    source: FakeSource,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """FR-002 (T034): a universe file that fails validation stops the run before any fetch."""
+    universe = tmp_path / UNIVERSE_FILE  # AAA's row becomes GOOG; the row count still matches
+    universe.write_text(
+        universe.read_text(encoding="utf-8").replace("AAA,AAA Inc.", "GOOG,GOOG Inc."),
+        encoding="utf-8",
+    )
+    before = table_contents(migrated_conn, ALL_TABLES)
+
+    assert detect() == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "UniverseFileError" in captured.err and "GOOG must be excluded" in captured.err
+    assert source.calls == []
+    assert table_contents(migrated_conn, ALL_TABLES) == before
+    assert all(rows == [] for rows in before.values())
+
+
+@pytest.mark.integration
+def test_universe_file_changed_after_first_run_exits_1_before_fetching(
+    detect: Callable[[], int],
+    migrated_conn: Conn,
+    source: FakeSource,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """FR-003 (T035): once frozen, an edited universe file stops the run before any fetch."""
+    assert detect() == 0
+    universe = tmp_path / UNIVERSE_FILE
+    universe.write_text(
+        universe.read_text(encoding="utf-8").replace("FLAG Inc.", "FLAG Corp."), encoding="utf-8"
+    )
+    before = table_contents(migrated_conn, ALL_TABLES)
+    source.calls.clear()
+    capsys.readouterr()
+
+    assert detect() == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "UniverseFrozenError" in captured.err and "edited FLAG" in captured.err
+    assert source.calls == []
+    assert table_contents(migrated_conn, ALL_TABLES) == before

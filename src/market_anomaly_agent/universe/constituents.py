@@ -1,6 +1,8 @@
 """Reads the committed, frozen Nasdaq-100 universe snapshot file (FR-001)."""
 
 import csv
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -57,3 +59,30 @@ def _parse_row(path: Path, line: int, row: dict[str, str]) -> UniverseConstituen
         source=row["source"].strip(),
         share_class_note=note or None,
     )
+
+
+def validate_universe(
+    constituents: Sequence[UniverseConstituent], expected_count: int = 100
+) -> None:
+    """Raise UniverseFileError unless the universe is one documented snapshot (FR-001) with
+    exactly one share class per company, GOOGL kept and GOOG excluded (FR-002)."""
+    if len(constituents) != expected_count:
+        raise UniverseFileError(f"universe has {len(constituents)} rows, expected {expected_count}")
+    dates = sorted({c.snapshot_date.isoformat() for c in constituents})
+    if len(dates) > 1:
+        raise UniverseFileError(f"rows have more than one snapshot_date: {', '.join(dates)}")
+    no_source = [c.ticker for c in constituents if not c.source.strip()]
+    if no_source:
+        raise UniverseFileError(f"rows without a source: {', '.join(no_source)}")
+    repeated = sorted(t for t, n in Counter(c.ticker for c in constituents).items() if n > 1)
+    if repeated:
+        raise UniverseFileError(f"tickers repeat: {', '.join(repeated)}")
+
+    by_ticker = {c.ticker: c for c in constituents}
+    if "GOOG" in by_ticker:
+        raise UniverseFileError("GOOG must be excluded; Alphabet is kept as GOOGL (FR-002)")
+    googl = by_ticker.get("GOOGL")
+    if googl is None:
+        raise UniverseFileError("GOOGL is missing; Alphabet is kept as GOOGL (FR-002)")
+    if not (googl.share_class_note or "").strip():
+        raise UniverseFileError("GOOGL needs a share_class_note naming the excluded class (FR-002)")

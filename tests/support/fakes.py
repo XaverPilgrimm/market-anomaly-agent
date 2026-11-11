@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 from market_anomaly_agent.calendar import fetch_window_start, trading_days_between
 from market_anomaly_agent.data.source import DailyBar
@@ -105,3 +106,24 @@ US1_SPECS = {
     "CCC": StockSpec(-0.0002, 1.0, 0.5, -0.0015),  # z ~ -1.49
     "BBB": StockSpec(0.0, 0.8, 1.5, 0.001),  # z ~ +0.33
 }
+
+
+# A non-qualifying Alphabet stock (z = 0), so end-to-end universes can include GOOGL (FR-002).
+GOOGL_SPEC = StockSpec(0.0003, 1.1, 1.0, 0.0)
+GOOGL_NOTE = "GOOGL kept, GOOG excluded"
+
+
+def write_universe_file(directory: Path, tickers: Sequence[str]) -> int:
+    """Write a fixture universe that passes `validate_universe`: one row per ticker plus GOOGL
+    with its share_class_note, never GOOG. Returns the row count."""
+    if "GOOG" in tickers:
+        raise ValueError("fixture universes must exclude GOOG (FR-002)")
+    rows = sorted({*tickers, "GOOGL"})
+    lines = ["ticker,company_name,snapshot_date,source,share_class_note"]
+    lines += [
+        f"{t},{t} Inc.,2026-10-01,https://example.test/holdings.csv,"
+        + (f'"{GOOGL_NOTE}"' if t == "GOOGL" else "")
+        for t in rows
+    ]
+    (directory / "nasdaq100_2026-10-01.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(rows)

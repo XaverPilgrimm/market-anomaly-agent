@@ -1,6 +1,8 @@
-"""Append-only storage of detection runs (data-model.md). This module never updates or deletes."""
+"""Append-only storage of detection runs and the frozen universe (data-model.md). This module
+never updates or deletes."""
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -10,6 +12,7 @@ import psycopg
 from market_anomaly_agent.data.source import DailyBar
 from market_anomaly_agent.detection import DetectionResult
 from market_anomaly_agent.rules import DAILY_CAP, Z_THRESHOLD
+from market_anomaly_agent.universe.constituents import UniverseConstituent
 
 Conn = psycopg.Connection[tuple[object, ...]]
 
@@ -205,3 +208,64 @@ def load_bar_snapshot(conn: Conn, evaluated_date: date) -> dict[str, list[DailyB
             DailyBar(trading_date=trading_date, open=open_, close=close, volume=int(str(volume)))
         )
     return snapshot
+
+
+class UniverseFrozenError(Exception):
+    """The committed universe file no longer matches the frozen universe table (FR-003)."""
+
+
+def load_universe_once(conn: Conn, constituents: Sequence[UniverseConstituent]) -> None:
+    """Insert the universe into an empty `universe_constituents` table; afterwards only check
+    that `constituents` still equals what is stored (FR-003, SC-006).
+
+    Raises UniverseFrozenError, writing nothing, when any row was added, removed or edited.
+    The table lock makes two first runs at once insert the universe only once.
+    """
+    wanted = {c.ticker: c for c in constituents}
+    with conn.transaction():
+        conn.execute("LOCK TABLE universe_constituents IN SHARE ROW EXCLUSIVE MODE")
+        rows = conn.execute(
+            "SELECT ticker, company_name, snapshot_date, source, share_class_note "
+            "FROM universe_constituents"
+        ).fetchall()
+        if not rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO universe_constituents
+                        (ticker, company_name, snapshot_date, source, share_class_note)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (c.ticker, c.company_name, c.snapshot_date, c.source, c.share_class_note)
+                        for c in constituents
+                    ],
+                )
+            return
+
+    stored = {str(r[0]): _constituent(r) for r in rows}
+    added = sorted(wanted.keys() - stored.keys())
+    removed = sorted(stored.keys() - wanted.keys())
+    edited = sorted(t for t in wanted.keys() & stored.keys() if wanted[t] != stored[t])
+    if added or removed or edited:
+        changes = [
+            f"{label} {', '.join(tickers)}"
+            for label, tickers in (("added", added), ("removed", removed), ("edited", edited))
+            if tickers
+        ]
+        raise UniverseFrozenError(
+            "the committed universe file no longer matches the frozen universe table: "
+            + "; ".join(changes)
+        )
+
+
+def _constituent(row: tuple[object, ...]) -> UniverseConstituent:
+    ticker, company_name, snapshot_date, source, share_class_note = row
+    assert isinstance(snapshot_date, date)
+    return UniverseConstituent(
+        ticker=str(ticker),
+        company_name=str(company_name),
+        snapshot_date=snapshot_date,
+        source=str(source),
+        share_class_note=None if share_class_note is None else str(share_class_note),
+    )
