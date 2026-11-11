@@ -91,9 +91,9 @@ principals:
 
 | Principal | PostgreSQL role | Created by | Privileges |
 |---|---|---|---|
-| Owner's Entra account | `<owner UPN>` (Entra admin) | Bicep, `flexibleServers/administrators` | Member of `azure_pg_admin`, CREATEROLE, CREATEDB. Used only for bootstrap, read-only queries, `pg_dump` and restore. Never used by the job. |
+| Entra security group `maa-db-admins`, whose only member is the owner's account (R16) | `maa-db-admins` (Entra admin) | Group: `entra-bootstrap.sh` on the host. Admin entry: Bicep, `flexibleServers/administrators` with `principalType: 'Group'` | Member of `azure_pg_admin`, CREATEROLE, CREATEDB. The owner signs in as `maa-db-admins` with their own token. Used only for bootstrap, read-only queries, `pg_dump` and restore. Never used by the job. |
 | Job's user-assigned managed identity `id-maa-job` | `id-maa-job` | Bootstrap SQL, `pgaadauth_create_principal('id-maa-job', false, false)` in database `postgres` | `CONNECT, TEMPORARY` on database `market_anomaly_agent`; `USAGE, CREATE` on schema `public`. Owns every table its migrations create. Not superuser, no CREATEROLE, no CREATEDB. |
-| Owner → job role membership | — | Bootstrap SQL, `GRANT "id-maa-job" TO "<owner UPN>" WITH INHERIT TRUE, SET TRUE` | Lets the owner read every table the job owns (queries, `pg_dump`) and restore as the job role (`pg_restore --role`). |
+| Admin group → job role membership | — | Bootstrap SQL, `GRANT "id-maa-job" TO "maa-db-admins" WITH INHERIT TRUE, SET TRUE` | Lets the owner, signed in as the group, read every table the job owns (queries, `pg_dump`) and restore as the job role (`pg_restore --role`). |
 
 **The migrations run inside the job, as `id-maa-job`**, before detection starts (FR-006, the new
 `--migrate` flag in [contracts/cli-contract.md](./contracts/cli-contract.md)). The tables are
@@ -101,7 +101,7 @@ therefore owned by the role that writes them, and no human step is needed when a
 a migration. The owner never runs migrations against Azure.
 
 **Bootstrap** (`infra/sql/bootstrap.sql`, run once per new server by `infra/scripts/db-bootstrap.sh`
-on the host, as the Entra admin; idempotent):
+on the host, signed in as the admin group `maa-db-admins`; idempotent):
 
 1. In `postgres`: create the principal if it is missing (`pgaadauth_create_principal`).
 2. In `postgres`: `CREATE DATABASE market_anomaly_agent` if it is missing. The admin creates it, so
@@ -110,7 +110,7 @@ on the host, as the Entra admin; idempotent):
    database is not documented.
 3. Grant the privileges in the table above, and `REVOKE ALL ON DATABASE market_anomaly_agent FROM
    PUBLIC`.
-4. Grant the owner membership in `id-maa-job`.
+4. Grant the admin group `maa-db-admins` membership in `id-maa-job`.
 5. Fail loudly unless `has_schema_privilege('id-maa-job', 'public', 'CREATE')` and
    `pg_has_role(current_user, 'id-maa-job', 'USAGE')` are both true.
 
@@ -124,10 +124,11 @@ on the host, as the Entra admin; idempotent):
 - The documentation says not to use the Entra administrator for regular database operations, so the
   job gets its own role.
 - Step 4 relies on PostgreSQL 16+ behaviour: a CREATEROLE role that creates a role receives ADMIN
-  OPTION on it. Microsoft's pages do not say whether this holds when the role is created through
+  OPTION on it. Here that role is the group role `maa-db-admins`, because a group member's session
+  runs as the group (`current_user = 'maa-db-admins'`). Microsoft's pages do not say whether this holds when the role is created through
   `pgaadauth_create_principal`. **Open risk, guarded**: step 5 fails the bootstrap if the
-  membership is missing. If it fails, the fallback is to drop the membership and give the owner
-  `SELECT` through `ALTER DEFAULT PRIVILEGES` issued by the job role in its own first execution.
+  membership is missing. If it fails, the fallback is to drop the membership and give the admin
+  group `SELECT` through `ALTER DEFAULT PRIVILEGES` issued by the job role in its own first execution.
   That needs a small Azure-only bootstrap path in code and is not planned unless step 5 fails.
 - Token resource: `https://ossrdbms-aad.database.windows.net` (scope `…/.default`). On the host:
   `az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv`. "The access
@@ -136,8 +137,9 @@ on the host, as the Entra admin; idempotent):
 
 **Alternatives considered**:
 
-- *An Entra group shared by the owner and the job.* Rejected: it needs Graph permissions outside
-  Bicep's normal resource model, and both principals would act as the same role.
+- *One Entra group shared by the owner and the job.* Rejected: both principals would act as the
+  same role, so the job would get admin rights. The admin group of R16 holds the owner only; the
+  job keeps its own role.
 - *Making the job role the database owner.* Rejected: it grants more than FR-017a's minimum.
 - *Having the owner run migrations from the host.* Rejected: it breaks FR-006 (unattended) and
   splits table ownership.
@@ -181,8 +183,10 @@ identity must also appear under `identity.userAssignedIdentities`. `id-maa-job` 
 **How the value gets in**: `deploy.sh` prompts with `read -rs` and passes it as the `@secure()`
 Bicep parameter `twelveDataApiKey`. The secret resource is created only when the parameter is
 non-empty, so a later redeploy can leave it empty and keep the stored value. Secure parameters are
-not shown by `what-if` and are not kept in deployment history. The owner gets **Key Vault Secrets
-Officer** on the vault, so the value can also be rotated with `az keyvault secret set`.
+not shown by `what-if` and are not kept in deployment history. The admin group `maa-db-admins`
+(R16) gets **Key Vault Secrets Officer** on the vault, so the owner can also rotate the value with
+`az keyvault secret set`. Assigning the role to the group rather than to the user keeps the
+owner's object ID out of the deployment.
 
 **Soft delete and teardown**: purge protection stays off, so `teardown.sh` can purge the vault and
 an immediate redeploy can reuse its deterministic name (US4 scenario 3, FR-027).
@@ -296,9 +300,11 @@ rules on the Log Analytics workspace:
    failure fires it, so the owner may get up to 3 emails for one bad execution. FR-022 asks for at
    least one; deduplicating is not worth the extra machinery. This rule meets SC-004 (within
    15 minutes).
-2. **No completed run**: runs once a day at 12:45 UTC, Tuesday to Saturday. It fires when
+2. **No completed run**: evaluated every hour (`PT1H`). Scheduled query rules run at a fixed
+   frequency, not at a time of day, so the query itself holds the schedule. It returns a row only
+   when the evaluation time is between 12:45 and 13:45 UTC on a Tuesday to Saturday, and
    `ContainerAppConsoleLogs_CL` holds no line containing `status=completed` from `job-maa-detect`
-   since 11:00 UTC that day. FR-002 makes even an "already stored" start print that line, so every
+   since 11:00 UTC that day. It therefore fires at most once a day. FR-002 makes even an "already stored" start print that line, so every
    healthy scheduled day produces one. The rule catches whatever rule 1's reason strings miss: an
    image that cannot be pulled, an unforeseen event name, a broken schedule.
 
@@ -344,7 +350,7 @@ in EUR before the first deployment.
 | Container Apps environment (consumption only) | No idle charge | 0.00 | 0.00 |
 | Log Analytics | < 0.2 GB/month ingested, inside the 5 GB free allowance; 30-day retention (free up to 31 days) | 0.00 | 0.00 |
 | Alert rule 1 (5-minute frequency) | ~USD 1.50 per rule | 1.50 | 1.34 |
-| Alert rule 2 (daily) | ~USD 0.50 per rule | 0.50 | 0.45 |
+| Alert rule 2 (hourly) | ~USD 0.50 per rule (frequencies of 15 minutes or longer) | 0.50 | 0.45 |
 | Action group email, budget | Free | 0.00 | 0.00 |
 | Key Vault Standard | ~1,000 operations, USD 0.03 per 10,000 | 0.01 | 0.01 |
 | Bandwidth | Image pull from GHCR is inbound (free); egress < 1 GB | 0.00 | 0.00 |
@@ -427,3 +433,62 @@ scripts in `infra/scripts/` start by refusing to run in the agent container (the
 `docker.io/library/postgres:17` container started with `podman run --rm` on the host, so no local
 client installation is needed. The only Azure sign-in outside the host is GitHub Actions through
 the OIDC federated credential (R7).
+
+## R16. Entra administrator: a security group, and no identifiers in the public repository
+
+**Decision**: the server's Entra administrator is the security group **`maa-db-admins`**, whose
+only member is the owner's account. It is not the owner's user account.
+
+- `infra/scripts/entra-bootstrap.sh` (host) creates the group if it is missing:
+  `az ad group create --display-name maa-db-admins --mail-nickname maa-db-admins`. Groups created
+  this way are security groups.
+- It reads the signed-in user's object ID at run time
+  (`az ad signed-in-user show --query id -o tsv`) and adds that user if not yet a member
+  (`az ad group member check`, then `az ad group member add`).
+- It fails, without removing anyone, if the group has any other member, so the "only member" rule
+  is checked on every deployment.
+- `deploy.sh` runs it first, then reads the group's object ID (`az ad group show --group
+  maa-db-admins --query id -o tsv`) and passes it as the deployment parameter
+  `dbAdminGroupObjectId`.
+- Bicep sets `flexibleServers/administrators/<dbAdminGroupObjectId>` with
+  `principalType: 'Group'` and `principalName: 'maa-db-admins'`, and assigns Key Vault Secrets
+  Officer to the group (R5).
+- The owner signs in to PostgreSQL with **user `maa-db-admins`** and their own token from
+  `az account get-access-token --resource-type oss-rdbms`. Microsoft's documentation describes
+  group members signing in with the group's name as the role name and their own token
+  ([manage Entra users](https://learn.microsoft.com/en-us/azure/postgresql/security/security-manage-entra-users);
+  the admin "can be a user, group, service principal, or managed identity").
+
+**Rationale**:
+
+- The owner's account is a personal Microsoft account. Microsoft's PostgreSQL pages list groups as
+  supported administrators but say nothing about personal accounts.
+- A group ties admin access to membership rather than to one user. If personal accounts turn out
+  not to work, a cloud-only work account in the same tenant can be added to the group instead
+  (and the personal account removed), without changing the server or redeploying.
+- The Entra group is a directory object, not an Azure resource, so it is created by the host
+  script rather than by Bicep. FR-024 covers Azure resources, and the group is still created from
+  the repository, never by hand.
+
+**Open risk, gated**: whether the server accepts a personal account's token through group
+membership is not documented. Check Q7 in quickstart.md is the first sign-in
+(`db-bootstrap.sh`). If it fails with an authentication error, use the work-account fallback above
+before anything else.
+
+**No identifiers in files**: the repository is public. No file may contain the owner's email
+address, tenant domain, tenant ID, subscription ID or any object ID (spec FR-025). Scripts read
+them at run time from `az`:
+
+| Value | Read with |
+|---|---|
+| Owner's object ID | `az ad signed-in-user show --query id -o tsv` |
+| Group's object ID | `az ad group show --group maa-db-admins --query id -o tsv` |
+| Tenant ID | `az account show --query tenantId -o tsv` |
+| Subscription ID | `az account show --query id -o tsv` |
+
+The documentation uses placeholders such as `<tenant-id>`, `<subscription-id>` and
+`<server-fqdn>`. The pipeline gets the tenant ID, the subscription ID and its own client ID from
+GitHub repository **variables**, set by `deploy.sh` through `gh variable set`; these are never
+written to a file. Fixed public names (`maa-db-admins`, `id-maa-job`, the repository slug) and
+Microsoft's documented built-in role definition IDs are not personal identifiers and may appear in
+files.

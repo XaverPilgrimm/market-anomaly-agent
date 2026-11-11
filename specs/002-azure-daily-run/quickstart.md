@@ -6,11 +6,17 @@
 > **Host only.** Every `az`, `gh`, `podman` and database-client command below runs on the
 > owner's host, never inside the agent container (research R15). Claude Code does not run any of
 > them.
+>
+> **Placeholders.** The repository is public, so this guide never shows the owner's email
+> address, tenant domain, tenant ID, subscription ID or any object ID (research R16). Where one is
+> needed it appears as `<tenant-id>`, `<subscription-id>`, `<server-fqdn>` and so on, and the
+> scripts read the real values at run time from `az`.
 
 ## 0. Prerequisites (host)
 
 - `az` signed in to the project subscription as the owner, with Owner rights (or Contributor plus
-  User Access Administrator).
+  User Access Administrator), and with the right to create security groups in the tenant (the
+  default for the account that created the tenant).
 - `gh` signed in to `XaverPilgrimm/market-anomaly-agent`.
 - `podman`, for the `postgres:17` client container.
 - The Twelve Data key and the alert email address at hand. Neither goes into any file.
@@ -21,20 +27,28 @@
 |---|---|---|---|
 | Q1 | Region offers everything | `infra/scripts/preflight.sh germanywestcentral` (wraps `az postgres flexible-server list-skus -l …` and `az provider show -n Microsoft.App …`) | `Standard_B1ms` (Burstable) and version `17` listed; `jobs` lists the region. Otherwise rerun with the next fallback (`westeurope`, `northeurope`, `swedencentral`) and set `location` (research R2). |
 | Q2 | Cost in EUR | Azure pricing calculator, chosen region, EUR: B1ms 730 h, 32 GiB storage, two log alert rules | Total ≤ EUR 24 (the 80% notification threshold of the EUR 30 budget, so a normal month never triggers it); update research R10 with the real figures |
-| Q6 | What-if is clean | `infra/scripts/deploy.sh` stops at the what-if prompt; answer **n** the first time and read it | Only the resources in data-model.md §3 are created; nothing outside `rg-maa-data`, `rg-maa-env` and the subscription-scope budget and role is touched |
+| Q6 | What-if is clean | `infra/scripts/deploy.sh` first runs `entra-bootstrap.sh` (prints `admin group ok`), then stops at the what-if prompt; answer **n** the first time and read it | The group `maa-db-admins` exists with you as its only member (`az ad group member list --group maa-db-admins --query "[].displayName"`). Only the resources in data-model.md §3 are created; nothing outside `rg-maa-data`, `rg-maa-env` and the subscription-scope budget and role is touched. The Entra administrator in the what-if is a `Group`. |
 
 ## 2. Deploy and bootstrap
 
 ```bash
-infra/scripts/deploy.sh            # what-if → confirm "y" → create; prompts for key and email
-gh variable set AZURE_CLIENT_ID --body <printed>      # deploy.sh offers to do these three
-gh variable set AZURE_TENANT_ID --body <printed>
-gh variable set AZURE_SUBSCRIPTION_ID --body <printed>
+infra/scripts/deploy.sh            # entra-bootstrap → what-if → confirm "y" → create; prompts for key and email
+gh variable set AZURE_CLIENT_ID --body <client-id>              # deploy.sh offers to do these three
+gh variable set AZURE_TENANT_ID --body <tenant-id>
+gh variable set AZURE_SUBSCRIPTION_ID --body <subscription-id>
 infra/scripts/db-access.sh open
-infra/scripts/db-bootstrap.sh      # role, database, grants; fails loudly on a missing privilege
+infra/scripts/db-bootstrap.sh      # signs in as maa-db-admins with your token (check Q7); role, database, grants
 infra/scripts/db-access.sh close
 gh workflow run ci.yml --ref main  # first real image → job
 ```
+
+**Check Q7: admin sign-in through the group (research R16).** `db-bootstrap.sh` is the first
+sign-in as `maa-db-admins`. It must print `bootstrap ok`. If it fails with an authentication
+error (for example `password authentication failed for user "maa-db-admins"` or an
+invalid-token message), the server does not accept the personal account through the group. Then
+create a cloud-only work account in the tenant, add it to `maa-db-admins`, remove the personal
+account, sign in to `az` with the work account, and rerun `entra-bootstrap.sh` and
+`db-bootstrap.sh`. The server does not change.
 
 After the first push, set the GHCR package `market-anomaly-agent` to **public** once (package
 settings on GitHub). Without that step, the job cannot pull the image.

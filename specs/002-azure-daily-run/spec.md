@@ -34,6 +34,16 @@ no new stored entities.
   disabled: the job connects with its managed identity, the owner with their own Entra account.
   No database password exists, so Key Vault holds only the Twelve Data key. Local development
   keeps the password-based `DATABASE_URL` against the local PostgreSQL.
+- Q: Who is the server's Entra administrator? → A: A Microsoft Entra security group, not the
+  owner's user account, with the owner's account as its only member. The owner's account is a
+  personal Microsoft account. Microsoft's PostgreSQL documentation lists groups as supported
+  administrators but does not say whether personal accounts work, and a group ties admin access to
+  membership rather than to one user. The host bootstrap script creates the group with
+  `az ad group create` and adds the signed-in user, whose object ID it reads at run time with
+  `az ad signed-in-user show`. The owner signs in with the group name as the database user and
+  their own token. The repository is public, so no file may contain the owner's email address,
+  tenant domain, tenant ID, subscription ID or any object ID: scripts read them at run time from
+  `az`, and the documentation uses placeholders.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -314,9 +324,12 @@ the documented cost estimate of the deployed resources is below EUR 30 per month
   (FR-029).
 - **FR-017a**: The database MUST accept only Microsoft Entra authentication. Password
   authentication MUST be disabled. The job MUST connect as its managed identity, using a
-  short-lived token. The owner MUST connect with their own Entra account, which is the server's
-  Entra administrator. The job's identity MUST have only the database privileges needed to apply
-  migrations and read and write the project's tables.
+  short-lived token. The server's Entra administrator MUST be a Microsoft Entra security group,
+  not a user account, whose only member is the owner's account. The host bootstrap script MUST
+  create the group (`az ad group create`) if it is missing and add the signed-in user, reading
+  that user's object ID at run time (`az ad signed-in-user show`). The owner MUST connect with the
+  group's name as the database user and their own access token. The job's identity MUST have only
+  the database privileges needed to apply migrations and read and write the project's tables.
 
 **Secrets and identities**
 
@@ -349,7 +362,10 @@ the documented cost estimate of the deployed resources is below EUR 30 per month
   person who deploys.
 - **FR-025**: The repository MUST document one deployment procedure that builds the environment
   from an empty target. The owner's only inputs are the vendor key, the notification address and
-  non-secret identifiers (subscription, region, GitHub repository, the owner's Entra account).
+  the choice of region. Because the repository is public, no file in it may contain the owner's
+  email address, tenant domain, tenant ID, subscription ID or any object ID. Scripts MUST read
+  these at run time from `az` (the signed-in account and subscription), and the documentation
+  MUST use placeholders for them.
 - **FR-026**: Running the deployment again against an existing environment MUST converge to the
   same state without losing stored data. It MUST reuse an existing database rather than replace
   it.
@@ -394,8 +410,9 @@ the documented cost estimate of the deployed resources is below EUR 30 per month
 - **Database export**: a `pg_dump` file written to a private local location outside the
   repository during decommission, and the only input of a restore.
 - **Deployment inputs**: the values supplied by the owner at deployment and never committed: the
-  vendor key and the notification address. Non-secret identifiers, the owner's Entra account
-  among them, can be kept as repository or pipeline variables.
+  vendor key and the notification address. Identifiers of the owner's account, tenant and
+  subscription are read at run time from `az`. Those the pipeline needs (tenant, subscription and
+  the pipeline identity's client ID) are kept as GitHub repository variables, never in a file.
 
 ## Success Criteria *(mandatory)*
 
@@ -451,10 +468,12 @@ the documented cost estimate of the deployed resources is below EUR 30 per month
 - The local workflow (`podman compose` and `detect --date`) keeps working unchanged (constitution
   Technology Constraints). The new mode also runs locally, with the password-based
   `DATABASE_URL`.
-- The owner has a Microsoft Entra account in the subscription's tenant that can be made the
-  database's Entra administrator.
+- The owner's signed-in account (a personal Microsoft account) can create a security group in
+  the subscription's tenant and add itself to it. If Azure Database for PostgreSQL does not accept
+  a personal account's token through group membership, a cloud-only work account in the same
+  tenant can be added to the group instead, without changing the server.
 - Non-secret identifiers (tenant, subscription, client and resource IDs) are not credentials. They
-  may be kept as GitHub repository variables.
+  may be kept as GitHub repository variables, but not in any file in the public repository.
 - Out of scope: the agent, X, the website, Azure OpenAI, automatic catch-up of missed days, more
   than one environment (no staging), and detecting a scheduler that never starts an execution at
   all.

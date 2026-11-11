@@ -23,7 +23,11 @@ list for the life of the process.
 ## 2. Database principals (Azure only)
 
 ```text
-<owner UPN>  ──member of──▶ azure_pg_admin          (Entra admin; bootstrap, read, dump, restore)
+Entra:  owner's account ──only member of──▶ security group maa-db-admins   (research R16)
+
+PostgreSQL:
+maa-db-admins ──member of──▶ azure_pg_admin   (Entra admin; the owner signs in as this role
+     │                                         with their own token; bootstrap, read, dump, restore)
      │
      └──member of (INHERIT, SET)──▶ id-maa-job      (job's managed identity)
                                        │
@@ -38,13 +42,20 @@ PUBLIC ── no privileges on DATABASE market_anomaly_agent
 | No role has a password, and password authentication is disabled server-wide. | FR-017a, FR-020 |
 | `id-maa-job` is not superuser and has neither CREATEROLE nor CREATEDB. | FR-017a, research R3 |
 | Migrations run only as `id-maa-job`, from the job (`detect --latest --migrate`). | FR-006, research R3 |
-| The owner reads through membership and queries with `default_transaction_read_only=on` by convention. | research R3 |
+| The owner signs in as `maa-db-admins`, reads through that role's membership, and queries with `default_transaction_read_only=on` by convention. | research R3, R16 |
+| `maa-db-admins` has exactly one member, the owner's account; `entra-bootstrap.sh` fails if it finds another. | FR-017a, research R16 |
 | The bootstrap is idempotent and verifies its result (`has_schema_privilege`, `pg_has_role`). | research R3 |
 
 ## 3. Cloud resources
 
 Names are fixed by convention; `<u>` is `uniqueString(subscription().id)` truncated to 6 characters
 (stable across teardown and redeploy).
+
+### Microsoft Entra (directory, not an Azure resource; survives teardown)
+
+| Object | Name | Notes |
+|---|---|---|
+| Security group | `maa-db-admins` | Created by `entra-bootstrap.sh`; only member: the owner's account. Its object ID is read at run time and never written to a file (research R16). |
 
 ### Subscription scope (survives teardown)
 
@@ -61,7 +72,7 @@ Names are fixed by convention; `<u>` is `uniqueString(subscription().id)` trunca
 |---|---|---|
 | User-assigned identity | `id-maa-job` | Its object ID is bound to the PostgreSQL role (research R4) |
 | PostgreSQL Flexible Server | `psql-maa-<u>` | `Standard_B1ms` (Burstable), version 17, 32 GiB storage, backup 7 days, no HA, no geo-backup, Entra-only auth, public access |
-| Entra administrator | (child of server) | Owner's object ID, principal type User |
+| Entra administrator | (child of server) | Group `maa-db-admins`: `principalType: 'Group'`, object ID from the deployment parameter `dbAdminGroupObjectId` |
 | Server parameter | `require_secure_transport` | `on` |
 | Server parameter | `ssl_min_protocol_version` | `TLSv1.2` |
 | Firewall rule | `AllowAllAzureServicesAndResourcesWithinAzureIps` | 0.0.0.0–0.0.0.0 |
@@ -80,14 +91,14 @@ Names are fixed by convention; `<u>` is `uniqueString(subscription().id)` trunca
 | User-assigned identity | `id-maa-github` | Federated credential `github-main`, subject `repo:XaverPilgrimm/market-anomaly-agent:ref:refs/heads/main` |
 | Action group | `ag-maa-owner` | Email receiver = deploy input |
 | Scheduled query rule | `alert-maa-execution-failed` | Every 5 minutes (research R9) |
-| Scheduled query rule | `alert-maa-no-completed-run` | Daily 12:45 UTC, Tuesday to Saturday (research R9) |
+| Scheduled query rule | `alert-maa-no-completed-run` | Every hour; the query only matches between 12:45 and 13:45 UTC, Tuesday to Saturday (research R9) |
 
 ### Role assignments
 
 | Principal | Role | Scope |
 |---|---|---|
 | `id-maa-job` | Key Vault Secrets User | secret `twelve-data-api-key` |
-| Owner | Key Vault Secrets Officer | vault `kv-maa-<u>` |
+| Group `maa-db-admins` | Key Vault Secrets Officer | vault `kv-maa-<u>` |
 | `id-maa-github` | Market Anomaly Agent job image updater | job `job-maa-detect` |
 
 With GHCR (research R6) there is no registry resource and no AcrPull or AcrPush assignment.

@@ -7,12 +7,17 @@ Rationale: [../research.md](../research.md)
 agent container, and never by Claude Code (research R15). Each script exits 1 straight away if
 `/run/.containerenv` exists. Database clients come from `podman run --rm docker.io/library/postgres:17 …`.
 
+**Public repository rule** (spec FR-025, research R16): no file, this one included, contains the
+owner's email address, tenant domain, tenant ID, subscription ID or any object ID. Scripts read them
+at run time from `az`. Documents use placeholders: `<tenant-id>`, `<subscription-id>`,
+`<server-fqdn>`, `<u>`.
+
 ## 1. Repository layout
 
 ```text
 infra/
 ├── main.bicep              # targetScope = 'subscription': RGs, lock, budget, custom role, modules
-├── main.bicepparam         # non-secret defaults only (location, names); no email, UPN, key or IP
+├── main.bicepparam         # non-secret defaults only (location, names); no email, key, IP, tenant/subscription/object ID
 ├── modules/
 │   ├── data.bicep          # rg-maa-data: id-maa-job, PostgreSQL server, admin, params, firewall
 │   └── env.bicep           # rg-maa-env: logs, environment, Key Vault, job, id-maa-github, alerts
@@ -20,8 +25,9 @@ infra/
 │   └── bootstrap.sql       # idempotent role/database bootstrap (research R3)
 └── scripts/
     ├── preflight.sh        # region and SKU checks (quickstart Q1)
-    ├── deploy.sh           # what-if, then create (confirm); prints GitHub variables
-    ├── db-bootstrap.sh     # runs bootstrap.sql as the Entra admin
+    ├── entra-bootstrap.sh  # admin group maa-db-admins: create if missing, add signed-in user, check sole member
+    ├── deploy.sh           # entra-bootstrap, what-if, then create (confirm); sets GitHub variables
+    ├── db-bootstrap.sh     # runs bootstrap.sql signed in as maa-db-admins
     ├── db-access.sh        # open | close the owner-access firewall rule
     ├── teardown.sh         # deletes rg-maa-env, purges the vault; never touches rg-maa-data
     ├── decommission.sh     # pg_dump → verify → remove lock → delete rg-maa-data
@@ -37,8 +43,8 @@ Containerfile
 |---|---|---|---|
 | `location` | string | `main.bicepparam`, default `germanywestcentral` | yes |
 | `githubRepository` | string | `main.bicepparam`, `XaverPilgrimm/market-anomaly-agent` | yes |
-| `ownerObjectId` | string | `deploy.sh`: `az ad signed-in-user show --query id` | **no** |
-| `ownerPrincipalName` | string | `deploy.sh`: `az ad signed-in-user show --query userPrincipalName` | **no** |
+| `dbAdminGroupName` | string | default `maa-db-admins` | yes (a fixed public name) |
+| `dbAdminGroupObjectId` | string | `deploy.sh`, at run time: `az ad group show --group maa-db-admins --query id -o tsv` | **no** |
 | `alertEmail` | string | `deploy.sh` prompt, or `$MAA_ALERT_EMAIL` | **no** (FR-022) |
 | `twelveDataApiKey` | `@secure()` string | `deploy.sh` `read -rs` prompt; empty keeps the stored secret | **no** (FR-018) |
 | `jobImage` | string | `deploy.sh`: current image on the job, else the placeholder `mcr.microsoft.com/k8se/quickstart-jobs:latest` | no |
@@ -47,17 +53,38 @@ Containerfile
 
 Outputs printed by `deploy.sh`: `AZURE_CLIENT_ID` (client ID of `id-maa-github`), `AZURE_TENANT_ID`,
 `AZURE_SUBSCRIPTION_ID`, the server FQDN, the job name. `deploy.sh` offers to store the first three
-with `gh variable set`. These are repository **variables**, not secrets: they are identifiers.
+with `gh variable set`. These are repository **variables**, not secrets: they are identifiers, kept
+in GitHub's settings and never written to a file.
+
+The owner's own object ID is not a deployment parameter. Only `entra-bootstrap.sh` reads it, to
+check and add the group membership.
+
+## 2a. `entra-bootstrap.sh` behaviour
+
+Run by `deploy.sh` as its first step, and runnable on its own. Idempotent.
+
+1. Refuse to run inside a container. Require `az account show` to succeed.
+2. `uid=$(az ad signed-in-user show --query id -o tsv)`.
+3. If `az ad group show --group maa-db-admins` fails, run
+   `az ad group create --display-name maa-db-admins --mail-nickname maa-db-admins` (a security
+   group).
+4. If `az ad group member check --group maa-db-admins --member-id "$uid" --query value -o tsv` is
+   not `true`, run `az ad group member add --group maa-db-admins --member-id "$uid"`.
+5. List the members (`az ad group member list --group maa-db-admins --query "[].id" -o tsv`). If
+   there is any member other than `$uid`, exit 1 with "maa-db-admins must have exactly one member"
+   and change nothing.
+6. Print `admin group ok`. Never print object IDs.
 
 ## 3. `deploy.sh` behaviour
 
 1. Refuse to run inside a container. Require `az account show` to succeed.
-2. Gather the inputs from §2.
-3. Run `az deployment sub what-if -l <location> -f infra/main.bicep -p infra/main.bicepparam -p …`
+2. Run `entra-bootstrap.sh` (§2a). Stop if it fails.
+3. Gather the inputs from §2, reading `dbAdminGroupObjectId` at run time.
+4. Run `az deployment sub what-if -l <location> -f infra/main.bicep -p infra/main.bicepparam -p …`
    and show the result.
-4. Run `az deployment sub create --confirm-with-what-if …`. Nothing is applied without an
+5. Run `az deployment sub create --confirm-with-what-if …`. Nothing is applied without an
    interactive "y" (research R13).
-5. Print the outputs, then the next steps: run `db-bootstrap.sh` on a new server; run
+6. Print the outputs, then the next steps: run `db-bootstrap.sh` on a new server; run
    `gh workflow run ci.yml --ref main` while the job still has the placeholder image.
 
 A rerun with unchanged inputs must produce a what-if with no changes, apart from the documented
@@ -110,10 +137,10 @@ and `id-token: write`. There is no `environment:` key (research R7).
 | Procedure | Command | Guarantees |
 |---|---|---|
 | Owner database access | `db-access.sh open`, work, `db-access.sh close` | The rule is updated, never deleted (it is locked, research R14). `close` sets `192.0.2.1`. |
-| Owner query | `psql "host=<fqdn> dbname=market_anomaly_agent user=<UPN> sslmode=verify-full sslrootcert=system options='-c default_transaction_read_only=on'"`, with `PGPASSWORD` set to a token from `az account get-access-token --resource-type oss-rdbms` | Read-only session; Entra token login |
+| Owner query | `psql "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=system options='-c default_transaction_read_only=on'"`, with `PGPASSWORD` set to the owner's own token from `az account get-access-token --resource-type oss-rdbms` | Read-only session; Entra token login as the admin group (research R16) |
 | Rotate vendor key | `az keyvault secret set --vault-name kv-maa-<u> -n twelve-data-api-key --value "$KEY"` (after `read -rs KEY`) | The job reads the latest version on its next execution |
-| Teardown | `teardown.sh` | Deletes `rg-maa-env` and purges `kv-maa-<u>`. `rg-maa-data` and the budget are kept. A redeploy can run straight away (FR-027). |
-| Decommission | `decommission.sh <dump path outside repo>` | Refuses a path inside the repository. Runs `teardown.sh` first, so no job is left referencing a deleted identity. Then runs `pg_dump -Fc`, checks the file is non-empty and that `pg_restore --list` succeeds, deletes `lock-maa-data`, and runs `az group delete -n rg-maa-data` (FR-031). |
+| Teardown | `teardown.sh` | Deletes `rg-maa-env` and purges `kv-maa-<u>`. `rg-maa-data`, the budget and the Entra group `maa-db-admins` are kept. A redeploy can run straight away (FR-027). |
+| Decommission | `decommission.sh <dump path outside repo>` | Refuses a path inside the repository. Runs `teardown.sh` first, so no job is left referencing a deleted identity. Then runs `pg_dump -Fc`, checks the file is non-empty and that `pg_restore --list` succeeds, deletes `lock-maa-data`, and runs `az group delete -n rg-maa-data` (FR-031). It keeps the Entra group `maa-db-admins`, which costs nothing and is reused by a later deployment; when the project ends for good, the owner removes it with `az ad group delete --group maa-db-admins`. |
 | Restore | `deploy.sh`, `db-bootstrap.sh`, then `restore.sh <dump path>`, in one sitting | `pg_restore --no-owner --role=id-maa-job` into `market_anomaly_agent`. Afterwards `schema_migrations` lists the migrations, so `--migrate` is a no-op (FR-032, SC-009). Until the bootstrap has run, the new `id-maa-job` has no database role, so a scheduled execution fails with exit 1 and alerts instead of writing into an empty database. `restore.sh` refuses to run if `detection_runs` already holds rows. |
 
 The dump file holds stored results only; it contains no credentials. It is still private and must

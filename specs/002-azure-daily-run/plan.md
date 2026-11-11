@@ -24,7 +24,11 @@ and push. Only pushes to `main` publish the image and switch the job to it, sign
 
 All Azure resources are Bicep, deployed from the owner's host only, always behind a **what-if**.
 The database and its identity sit in a separate, CanNotDelete-locked resource group that survives
-teardown. A subscription budget of **EUR 30**, the constitution's Azure cap (v1.2.0, stated in
+teardown. The server's Entra administrator is the security group **`maa-db-admins`**, whose only
+member is the owner's account; the owner signs in with the group name and their own token. The
+group is created by the host script `entra-bootstrap.sh`. Because the repository is public, no file
+contains the owner's email, tenant domain, tenant ID, subscription ID or any object ID; scripts
+read them from `az` at run time (research R16). A subscription budget of **EUR 30**, the constitution's Azure cap (v1.2.0, stated in
 EUR because Azure bills this subscription in EUR), alerts at 50, 80 and 100%. The estimated cost is
 **about EUR 19 per month** (63%) with GHCR as the registry, against about EUR 23 (78%) with ACR
 Basic (see [research.md](./research.md) R6 and R10).
@@ -90,9 +94,11 @@ minute. An "already stored" start finishes in under 2 minutes (SC-002). An execu
 - What-if: R13
 - Firewall under the lock: R14
 - Host-only commands: R15
+- Entra admin group and no identifiers in files: R16
 
 The ones that can only be confirmed on the owner's subscription are gates in quickstart.md:
-Q1 region, Q2 EUR prices, Q3 timeout scope, Q4 alert reason strings, Q5 pipeline role, Q6 what-if.
+Q1 region, Q2 EUR prices, Q3 timeout scope, Q4 alert reason strings, Q5 pipeline role, Q6 what-if,
+Q7 admin sign-in through the group with a personal account.
 
 ## Constitution Check
 
@@ -103,7 +109,7 @@ Q1 region, Q2 EUR prices, Q3 timeout scope, Q4 alert reason strings, Q5 pipeline
 | I. Deterministic numbers | ✅ Pass | No change to calculations. The new mode only chooses the day, through the existing tested NASDAQ calendar. |
 | II. Simplest solution first | ✅ Pass | Consumption environment; public endpoint (no VNet, private endpoint or NAT); one workflow; no agent loop. Every addition is required by a present FR: the `azure-identity` dependency (FR-017a), the second alert rule (FR-022, guarding against unconfirmed event names), the custom role (FR-009 least privilege). See Complexity Tracking. |
 | III. Research integrity | ✅ Pass | The universe file ships inside the image (001 FR-003). A stored day is never re-evaluated in `--latest` mode; immutability is unchanged. The unattended run makes "stored before outcome" reliable. The database survives teardown, and decommission exports before deleting. |
-| IV. Security | ✅ Pass | The only secret is in Key Vault, read through a managed identity. No database password exists. GitHub uses OIDC with no stored credential, restricted to `main`. Tokens are redacted. TLS uses `verify-full`. Pull requests have no Azure access. |
+| IV. Security | ✅ Pass | The only secret is in Key Vault, read through a managed identity. No database password exists. Admin access depends on membership of the group `maa-db-admins` (one member), not on one user account. No personal identifier or tenant, subscription or object ID is in the public repository (R16). GitHub uses OIDC with no stored credential, restricted to `main`. Tokens are redacted. TLS uses `verify-full`. Pull requests have no Azure access. |
 | V. Cost control | ✅ Pass | Budget of EUR 30, the constitution's Azure cap, at 50/80/100% on actual cost (R10). Estimate EUR 18.88 (63%). The vendor stays on the free plan, with at most 303 requests per day (FR-014), enforced in code by the existing rate limiter and a fail-closed exit 1 when the vendor refuses. Cost per run: Azure compute stays inside the free grant and the vendor is USD 0, so no per-run paid API is called; no cost row is stored (nothing to measure). Recorded here as a known non-applicability, not a violation. |
 | VI. Data and compliance | ✅ N/A | No public pages and no X or Brave data in this feature |
 | VII. Observability | ✅ Pass | All stdout and stderr plus system events go to Log Analytics (30 days); the start line carries mode, day and commit. Agent traces are not applicable (no agent). |
@@ -112,9 +118,10 @@ Q1 region, Q2 EUR prices, Q3 timeout scope, Q4 alert reason strings, Q5 pipeline
 | Workflow: no commits or pushes by Claude Code, feature branch plus pull request | ✅ Pass | Commands are host-only and run by the owner; the plan creates files only. |
 
 **Post-design re-check (after Phase 1)**: still passing. The design introduced no new service, and
-GHCR removes one Azure resource. Two items depend on the owner's subscription and are gated rather
-than assumed: B1ms and PostgreSQL 17 availability in Germany West Central (Q1, with an EU
-fallback), and the timeout scope (Q3).
+GHCR removes one Azure resource. The Entra group is a directory object, not a service. Three items
+depend on the owner's subscription and are gated rather than assumed: B1ms and PostgreSQL 17
+availability in Germany West Central (Q1, with an EU fallback), the timeout scope (Q3), and whether
+a personal account can sign in through the admin group (Q7, with a work-account fallback).
 
 ## Project Structure
 
@@ -155,7 +162,7 @@ infra/
 ├── main.bicep  main.bicepparam
 ├── modules/{data.bicep, env.bicep}
 ├── sql/bootstrap.sql
-└── scripts/{preflight,deploy,db-bootstrap,db-access,teardown,decommission,restore}.sh
+└── scripts/{_common,preflight,entra-bootstrap,deploy,db-bootstrap,db-access,teardown,decommission,restore}.sh
 
 Containerfile  .containerignore
 .github/workflows/ci.yml
@@ -179,6 +186,9 @@ disposable. The CI workflow and `Containerfile` sit at the conventional root loc
    research R10).
 3. **Region fallback order** if Germany West Central refuses B1ms or PostgreSQL 17 for this
    subscription: West Europe → North Europe → Sweden Central (research R2).
+4. **Entra administrator: the security group `maa-db-admins`**, with the owner's personal
+   Microsoft account as its only member, created by `entra-bootstrap.sh`. No owner, tenant,
+   subscription or object identifiers in any file (research R16).
 
 ## Complexity Tracking
 
