@@ -14,10 +14,13 @@ from market_anomaly_agent.detection import (
 )
 from market_anomaly_agent.storage.migrate import apply_migrations
 from market_anomaly_agent.storage.repository import (
+    UniverseFrozenError,
     load_bar_snapshot,
     load_run,
+    load_universe_once,
     save_run,
 )
+from market_anomaly_agent.universe.constituents import UniverseConstituent
 
 Conn = psycopg.Connection[tuple[object, ...]]
 
@@ -322,3 +325,81 @@ def test_invariant_violations_raise_before_any_write(
         save_run(migrated_conn, result)
 
     assert row_counts(migrated_conn) == NO_ROWS
+
+
+# --- load_universe_once (T033, FR-003, SC-006) -------------------------------------------------
+
+UNIVERSE_SOURCE = "https://www.invesco.com/qqq-holdings.csv"
+SNAPSHOT = date(2026, 10, 28)
+
+
+def universe() -> tuple[UniverseConstituent, ...]:
+    return (
+        UniverseConstituent("AAPL", "Apple Inc", SNAPSHOT, UNIVERSE_SOURCE, None),
+        UniverseConstituent(
+            "GOOGL", "Alphabet Inc Class A", SNAPSHOT, UNIVERSE_SOURCE, "GOOGL kept, GOOG excluded"
+        ),
+        UniverseConstituent("MSFT", "Microsoft Corp", SNAPSHOT, UNIVERSE_SOURCE, None),
+    )
+
+
+def universe_rows(conn: Conn) -> list[tuple[object, ...]]:
+    return conn.execute(
+        """
+        SELECT ticker, company_name, snapshot_date, source, share_class_note
+        FROM universe_constituents
+        ORDER BY ticker
+        """
+    ).fetchall()
+
+
+def as_rows(constituents: tuple[UniverseConstituent, ...]) -> list[tuple[object, ...]]:
+    return [
+        (c.ticker, c.company_name, c.snapshot_date, c.source, c.share_class_note)
+        for c in sorted(constituents, key=lambda c: c.ticker)
+    ]
+
+
+@pytest.mark.integration
+def test_load_universe_once_inserts_every_row_into_an_empty_table(migrated_conn: Conn) -> None:
+    load_universe_once(migrated_conn, universe())
+
+    assert universe_rows(migrated_conn) == as_rows(universe())
+
+
+@pytest.mark.integration
+def test_load_universe_once_with_identical_rows_changes_nothing(migrated_conn: Conn) -> None:
+    load_universe_once(migrated_conn, universe())
+
+    load_universe_once(migrated_conn, universe())
+
+    assert universe_rows(migrated_conn) == as_rows(universe())
+
+
+def changed_universes() -> list[tuple[str, tuple[UniverseConstituent, ...]]]:
+    u = universe()
+    first, rest = u[0], u[1:]
+    nvda = UniverseConstituent("NVDA", "NVIDIA Corp", SNAPSHOT, UNIVERSE_SOURCE, None)
+    return [
+        ("added", (*u, nvda)),
+        ("removed", u[:-1]),
+        ("company_name", (dataclasses.replace(first, company_name="Apple Inc."), *rest)),
+        ("snapshot_date", (dataclasses.replace(first, snapshot_date=date(2026, 11, 2)), *rest)),
+        ("source", (dataclasses.replace(first, source="https://example.test/other.csv"), *rest)),
+        ("share_class_note", (dataclasses.replace(first, share_class_note="added later"), *rest)),
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "changed", [c for _, c in changed_universes()], ids=[n for n, _ in changed_universes()]
+)
+def test_load_universe_once_rejects_any_change_and_leaves_the_table_unchanged(
+    migrated_conn: Conn, changed: tuple[UniverseConstituent, ...]
+) -> None:
+    load_universe_once(migrated_conn, universe())
+
+    with pytest.raises(UniverseFrozenError):
+        load_universe_once(migrated_conn, changed)
+
+    assert universe_rows(migrated_conn) == as_rows(universe())
