@@ -112,7 +112,7 @@ fi
 unset api_key
 
 # Output names are matched case-insensitively: ARM can return them with a changed case (for
-# example aZURE_CLIENT_ID), and a JMESPath query for the exact name then yields nothing.
+# example azurE_CLIENT_ID), and a JMESPath query for the exact name then yields nothing.
 outputs="$(az deployment sub show -n "$name" --query properties.outputs -o json)"
 output() {
     jq -r --arg k "$1" \
