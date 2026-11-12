@@ -17,6 +17,10 @@ PARAMS="$ROOT/infra/main.bicepparam"
 PLACEHOLDER_IMAGE=mcr.microsoft.com/k8se/quickstart-jobs:latest
 
 require_az_login
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required (for example: sudo apt install jq)" >&2
+    exit 1
+fi
 
 # 1. The Entra admin group must exist with exactly one member before Bicep references it.
 "$ROOT/infra/scripts/entra-bootstrap.sh"
@@ -107,8 +111,13 @@ if [[ $state != Succeeded ]]; then
 fi
 unset api_key
 
+# Output names are matched case-insensitively: ARM can return them with a changed case (for
+# example aZURE_CLIENT_ID), and a JMESPath query for the exact name then yields nothing.
+outputs="$(az deployment sub show -n "$name" --query properties.outputs -o json)"
 output() {
-    az deployment sub show -n "$name" --query "properties.outputs.$1.value" -o tsv
+    jq -r --arg k "$1" \
+        'to_entries | map(select((.key | ascii_downcase) == ($k | ascii_downcase))) | .[0].value.value // empty' \
+        <<<"$outputs"
 }
 
 echo
@@ -116,12 +125,21 @@ echo "deployed: server $(output serverFqdn), job $(output jobName)"
 
 # 4. GitHub repository variables for the pipeline's OIDC sign-in. Values go straight from the
 #    deployment outputs to gh; they are never printed.
+#    gh prompts "Paste your variable" when --body is empty, so an empty value is refused here and
+#    stdin is closed, which keeps the call non-interactive in every case.
 for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
     read -r -p "Set GitHub repository variable $var from this deployment? [y/N] " answer
     if [[ $answer == [yY] ]]; then
-        gh variable set "$var" --body "$(output "$var")"
+        value="$(output "$var")"
+        if [[ -z $value ]]; then
+            echo "deployment output $var is empty; $var not set (set it by hand with gh variable set)" >&2
+            continue
+        fi
+        gh variable set "$var" --body "$value" </dev/null
+        echo "set $var"
     fi
 done
+unset value
 
 cat <<EOF
 
