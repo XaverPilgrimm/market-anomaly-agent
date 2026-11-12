@@ -307,3 +307,197 @@ def test_progress_logs_go_to_stderr_and_stdout_is_only_the_summary(
         in captured.err
     )
     assert captured.out == SUMMARY + "\n"
+
+
+# --- Feature 002: `--latest`, `--migrate`, start line, token redaction ---------------------
+# contracts/cli-contract.md (002). `now` is injected; apply_migrations and the storage module's
+# issued_tokens() are faked on the modules the CLI calls them through.
+
+LATEST_NOW = datetime(2026, 11, 10, 11, 0, tzinfo=UTC)  # Tue 06:00 New York → Mon 2026-11-09
+LATEST_DAY = date(2026, 11, 9)
+TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.entra-token-0042"
+
+
+def info_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.INFO and r.name == "market_anomaly_agent"
+    ]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--date", "2026-11-09", "--latest"], ["--latest", "--date", "2026-11-09"], ["--migrate"]],
+)
+def test_date_and_latest_together_or_neither_exit_2(fakes: Fakes, argv: list[str]) -> None:
+    assert cli.main(argv, now=lambda: LATEST_NOW) == 2
+    assert fakes.detect_calls == []
+
+
+def test_latest_evaluates_the_most_recent_completed_trading_day(
+    fakes: Fakes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["--latest"], now=lambda: LATEST_NOW) == 0
+    latest_out = capsys.readouterr().out
+
+    assert fakes.detect_calls == [(LATEST_DAY, ["AAA", "BBB"])]
+    assert fakes.saved == [fakes.result]
+
+    fakes.saved.clear()
+    assert cli.main(["--date", "2026-11-09"], now=lambda: LATEST_NOW) == 0
+    date_out = capsys.readouterr().out
+
+    assert fakes.detect_calls[-1] == (LATEST_DAY, ["AAA", "BBB"])
+    assert latest_out == date_out
+    assert last_line(latest_out).startswith("evaluated_date=2026-11-09 status=completed ")
+
+
+@pytest.mark.parametrize(
+    ("argv", "commit", "expected"),
+    [
+        (["--latest"], "abc123", "start mode=latest evaluated_date=2026-11-09 version=abc123"),
+        (["--latest"], None, "start mode=latest evaluated_date=2026-11-09 version=unknown"),
+        (
+            ["--date", "2026-11-09"],
+            "abc123",
+            "start mode=date evaluated_date=2026-11-09 version=abc123",
+        ),
+    ],
+)
+def test_first_info_line_is_the_start_line(
+    fakes: Fakes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    commit: str | None,
+    expected: str,
+) -> None:
+    caplog.set_level(logging.INFO)
+    if commit is None:
+        monkeypatch.delenv("APP_COMMIT", raising=False)
+    else:
+        monkeypatch.setenv("APP_COMMIT", commit)
+
+    assert cli.main(argv, now=lambda: LATEST_NOW) == 0
+
+    assert info_messages(caplog)[0] == expected
+    assert f"INFO market_anomaly_agent: {expected}" in capsys.readouterr().err
+
+
+class MigrationFakes:
+    def __init__(self, fakes: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.order: list[str] = []
+        self.applied: list[str] = ["0001_init.sql"]
+        self.error: Exception | None = None
+        self.calls = 0
+
+        def apply_migrations(conn: Any) -> list[str]:
+            self.calls += 1
+            self.order.append("migrate")
+            if self.error is not None:
+                raise self.error
+            return list(self.applied)
+
+        def load_universe_tickers() -> list[str]:
+            self.order.append("universe")
+            return ["AAA", "BBB"]
+
+        def load_run(conn: Any, evaluated_date: date) -> StoredRun | None:
+            self.order.append("load_run")
+            return fakes.load_run(conn, evaluated_date)
+
+        monkeypatch.setattr(cli, "apply_migrations", apply_migrations)
+        monkeypatch.setattr(cli, "load_universe_tickers", load_universe_tickers)
+        monkeypatch.setattr(cli, "load_run", load_run)
+
+
+@pytest.fixture
+def migrations(fakes: Fakes, monkeypatch: pytest.MonkeyPatch) -> MigrationFakes:
+    return MigrationFakes(fakes, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("applied", "logged"),
+    [
+        (["0001_init.sql"], "applied migration(s): 0001_init.sql"),
+        ([], "applied migration(s): none"),
+    ],
+)
+def test_migrate_applies_migrations_first_and_logs_them(
+    fakes: Fakes,
+    migrations: MigrationFakes,
+    caplog: pytest.LogCaptureFixture,
+    applied: list[str],
+    logged: str,
+) -> None:
+    caplog.set_level(logging.INFO)
+    migrations.applied = applied
+
+    assert cli.main(["--latest", "--migrate"], now=lambda: LATEST_NOW) == 0
+
+    assert migrations.calls == 1
+    assert migrations.order[0] == "migrate"
+    assert "universe" in migrations.order and "load_run" in migrations.order
+    assert logged in info_messages(caplog)
+
+
+def test_migrate_also_works_with_an_explicit_date(fakes: Fakes, migrations: MigrationFakes) -> None:
+    assert cli.main(["--date", "2026-11-09", "--migrate"], now=lambda: LATEST_NOW) == 0
+    assert migrations.calls == 1
+    assert migrations.order[0] == "migrate"
+
+
+def test_without_migrate_no_migration_runs(fakes: Fakes, migrations: MigrationFakes) -> None:
+    assert cli.main(["--latest"], now=lambda: LATEST_NOW) == 0
+    assert migrations.calls == 0
+
+
+def test_migration_failure_exits_1_runs_nothing_else_and_is_scrubbed(
+    fakes: Fakes,
+    migrations: MigrationFakes,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    migrations.error = RuntimeError(f"migration 0002 failed on {DATABASE_URL}")
+
+    assert cli.main(["--latest", "--migrate"], now=lambda: LATEST_NOW) == 1
+
+    assert migrations.order == ["migrate"]
+    assert fakes.detect_calls == []
+    assert fakes.saved == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    for text in (captured.err, caplog.text):
+        assert DATABASE_URL not in text
+        assert "SECRET-db-pw" not in text
+    assert "RuntimeError" in captured.err
+
+
+def test_issued_access_tokens_are_scrubbed_from_errors_and_tracebacks(
+    fakes: Fakes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from market_anomaly_agent.storage import db
+
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(db, "issued_tokens", lambda: (TOKEN,))
+    fakes.detect_error = RuntimeError(f"login failed with token {TOKEN}")
+
+    assert cli.main(["--latest"], now=lambda: LATEST_NOW) == 1
+
+    captured = capsys.readouterr()
+    for text in (captured.out, captured.err, caplog.text):
+        assert TOKEN not in text
+    assert "login failed with token ***" in captured.err
+    tracebacks = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "Traceback (most recent call last)" in r.getMessage()
+    ]
+    assert len(tracebacks) == 1
+    assert tracebacks[0].endswith("RuntimeError: login failed with token ***")

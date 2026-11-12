@@ -1,0 +1,138 @@
+# Checks on every pull request to main and every push to main (spec FR-007).
+# Design: specs/002-azure-daily-run/contracts/deployment-contract.md §5 and research.md R7.
+#
+# The `checks` job never signs in to Azure. Publishing the image and updating the job
+# (`publish-deploy`, tasks.md T026) run only for main, after `checks` passes.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Throwaway CI-only value for the service container; not a credential for anything real.
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format check
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Unit tests (network blocked)
+        run: uv run pytest
+
+      - name: Integration tests (PostgreSQL 17)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: uv run pytest -m integration
+
+      # -x follows each script's `source` of _common.sh (via its `# shellcheck source=` directive).
+      - name: Shellcheck host scripts
+        run: |
+          if ! command -v shellcheck > /dev/null; then
+            sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          fi
+          shellcheck --version
+          shellcheck -x infra/scripts/*.sh
+
+      - name: Bicep build (offline, no Azure sign-in)
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      # Image build without push or registry login (tasks.md T007). The build also runs the
+      # Containerfile's CA guard (research R8).
+      - name: Build image (no push)
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: docker build --build-arg GIT_SHA="$GIT_SHA" -f Containerfile -t market-anomaly-agent:ci .
+
+      - name: Smoke-test image (usage line must offer --latest)
+        run: |
+          help="$(docker run --rm market-anomaly-agent:ci --help)"
+          printf '%s\n' "$help"
+          if ! grep -E '^usage: detect .*--latest' <<<"$help" > /dev/null; then
+            echo "the image's usage line lacks --latest" >&2
+            exit 1
+          fi
+
+  # Publish the image and switch the job to it: pushes to main (and manual runs on main) only,
+  # after every check passed (FR-007, FR-009; contracts/deployment-contract.md §5). No
+  # `environment:` key: it would change the OIDC subject away from refs/heads/main (research R7).
+  # Until deploy.sh has set the three Azure repository variables (before the first deployment),
+  # the whole job is skipped, so a merge to main shows a skipped job, not a failed one.
+  publish-deploy:
+    needs: checks
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+      vars.AZURE_CLIENT_ID != '' && vars.AZURE_TENANT_ID != '' && vars.AZURE_SUBSCRIPTION_ID != ''
+    runs-on: ubuntu-24.04
+    # Deployments run one after the other, never in parallel and never cancelled midway. GitHub
+    # keeps one run in progress and one pending; a third queued run replaces the pending one, so
+    # the newest commit is always the one that ends up deployed.
+    concurrency:
+      group: publish-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/xaverpilgrimm/market-anomaly-agent:${{ github.sha }}
+      GIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        run: |
+          docker build --build-arg GIT_SHA="$GIT_SHA" -f Containerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      # OIDC: the federated credential on id-maa-github accepts only refs/heads/main.
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Switch the job to the new image
+        run: az containerapp job update -n job-maa-detect -g rg-maa-env --image "$IMAGE" --output none

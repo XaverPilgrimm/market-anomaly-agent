@@ -1,0 +1,530 @@
+---
+
+description: "Task list for Unattended Daily Run on Azure"
+---
+
+# Tasks: Unattended Daily Run on Azure
+
+**Input**: Design documents from `/specs/002-azure-daily-run/`
+
+**Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/cli-contract.md,
+contracts/deployment-contract.md, quickstart.md
+
+**Tests**: Required for all application code. Constitution Principle VIII requires test-first
+development: every test task below comes before the task that implements it, and its tests MUST be
+seen failing first. No unit test makes a network call. The guard in `tests/conftest.py` stays
+active, and `azure.identity.ManagedIdentityCredential` is always replaced by a fake. Bicep and shell
+scripts have no unit tests. They are checked by `az bicep build` in CI and by the host-side checks
+in quickstart.md.
+
+**Organization**: Tasks are grouped by user story so each story can be implemented and tested on
+its own.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependency on an incomplete task)
+- **[Story]**: Which user story the task belongs to (US1 to US5)
+- **(owner, host)**: the task is performed by the owner on the host, never in the agent container
+  and never by Claude Code (research R15). An implementing agent stops at these tasks and hands
+  over. It MUST NOT run `az`, `gh`, `podman`, `psql` or `pg_dump` itself, and it MUST NOT commit,
+  push or merge (constitution, Development Workflow).
+
+## Path Conventions
+
+Single project at the repository root: `src/market_anomaly_agent/`, `tests/unit/`,
+`tests/integration/`. Infrastructure in `infra/`, the workflow in `.github/workflows/ci.yml`,
+the image definition in `Containerfile` (plan.md, Project Structure).
+
+## Shared decisions used by several tasks
+
+These are fixed here so no task has to decide them during implementation:
+
+- **Names** (data-model.md §3): resource groups `rg-maa-data` and `rg-maa-env`; identities
+  `id-maa-job` (in `rg-maa-data`) and `id-maa-github` (in `rg-maa-env`); server `psql-maa-<u>`;
+  vault `kv-maa-<u>`; secret `twelve-data-api-key`; job secret `price-data-api-key`; Log Analytics
+  workspace `log-maa`; environment `cae-maa`; job `job-maa-detect`; action group `ag-maa-owner`;
+  alerts `alert-maa-execution-failed` and `alert-maa-no-completed-run`; budget
+  `budget-maa-monthly`; lock `lock-maa-data`. In Bicep, `<u>` is
+  `take(uniqueString(subscription().id), 6)`.
+- **Database**: `market_anomaly_agent`. Job role `id-maa-job`. Entra administrator: the security
+  group `maa-db-admins`, whose only member is the owner's account (research R16). The owner signs in
+  with `user=maa-db-admins` and their own token.
+- **Public repository rule** (spec FR-025, research R16): no file may contain the owner's email
+  address, tenant domain, tenant ID, subscription ID or any object ID. Scripts read them at run
+  time (`az ad signed-in-user show`, `az ad group show`, `az account show`). Documents and comments
+  use placeholders such as `<tenant-id>`. Microsoft's documented built-in role definition IDs and
+  fixed public names are allowed.
+- **Image**: `ghcr.io/xaverpilgrimm/market-anomaly-agent:<commit-sha>`.
+  Placeholder before the first publish: `mcr.microsoft.com/k8se/quickstart-jobs:latest`.
+- **Constants in code**:
+  - `storage/db.py`: `AUTH_ENV_VAR = "DATABASE_AUTH"`, `CLIENT_ID_ENV_VAR = "AZURE_CLIENT_ID"`,
+    `ENTRA_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"`.
+  - `cli.py`: `COMMIT_ENV_VAR = "APP_COMMIT"`.
+  - `calendar.py`: the existing `_TZ = "America/New_York"`.
+- **Injected clock**: `cli.main(argv, *, source_factory=None, now=None)`, where
+  `now: Callable[[], datetime] | None` defaults to `lambda: datetime.now(UTC)`. Tests always pass
+  `now`.
+- **Start log line**, exactly:
+  `start mode=<latest|date> evaluated_date=<YYYY-MM-DD> version=<APP_COMMIT or unknown>`, at INFO,
+  before any database access.
+- **Already-stored log line** (US2), at INFO:
+  `<YYYY-MM-DD> already stored; nothing fetched`.
+- **Bicep API versions**: `Microsoft.App/jobs@2026-07-01` and the matching
+  `Microsoft.App/managedEnvironments` version. For the other resource types, use the newest
+  non-preview version listed in the Azure template reference.
+- **Fixed job settings** (contracts/deployment-contract.md §4): cron `0 11 * * 2-6`,
+  `replicaTimeout` `3600` (set as Bicep parameter `jobReplicaTimeoutSeconds`, default 3600, so
+  check Q3 can change it), `replicaRetryLimit` `2`, `parallelism` `1`, `replicaCompletionCount`
+  `1`, `0.5` vCPU / `1Gi`, args `["--latest", "--migrate"]`.
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: dependencies, ignore files and directory skeleton
+
+- [X] T001 Add `azure-identity` as a runtime dependency with `uv add azure-identity`, which updates `pyproject.toml` and `uv.lock`. Check that `uv run mypy` still passes; `azure-identity` ships type information, so no mypy override should be needed. If it is, add one to the `[[tool.mypy.overrides]]` section of `pyproject.toml`.
+- [X] T002 [P] Append `*.dump` to `.gitignore` (decommission exports, FR-031), and create the empty directories `infra/modules/`, `infra/sql/` and `infra/scripts/`, each with a `.gitkeep` until its first file exists.
+- [X] T003 [P] Create `.containerignore` excluding `.env`, `.env.*` (but not `.env.example`), `.git/`, `.github/`, `specs/`, `tests/`, `infra/`, `.venv/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/`, `*.dump` and `.claude/` (FR-005: no secret or environment file in the image).
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: the subscription-scope Bicep entry point, the host-only guard shared by every
+script, and the CI checks every later change is validated by
+
+**⚠️ CRITICAL**: No user story work can begin until this phase is complete
+
+- [X] T004 Create `infra/scripts/_common.sh`, sourced by every script. It does three things. (1) `set -euo pipefail`. (2) It exits 1 with `run this on the host, not inside a container (research R15)` if `/run/.containerenv` or `/.dockerenv` exists. (3) It defines `require_az_login` (runs `az account show` and exits 1 with a clear message if that fails), `repo_root` (the git top level) and `pg_client` (`podman run --rm -i -e PGPASSWORD --network host docker.io/library/postgres:17 "$@"`). Make it non-executable; it is only sourced. *Added later:* its first line is `# shellcheck shell=bash` (it is sourced, so it has no shebang), and every script that sources it carries `# shellcheck source=infra/scripts/_common.sh` above the `source` line, so `shellcheck -x` (T007) can follow it.
+- [X] T005 Create `infra/main.bicep` with `targetScope = 'subscription'`:
+  - The parameters from contracts/deployment-contract.md §2: `location`, `githubRepository`, `dbAdminGroupName` (default `'maa-db-admins'`), `dbAdminGroupObjectId`, `alertEmail`, `@secure() twelveDataApiKey` (default `''`), `jobImage`, `ownerAccessIp` (default `'192.0.2.1'`), `budgetAmountEur` (default `30`), `jobReplicaTimeoutSeconds` (default `3600`), and `budgetStartDate` (default `'2026-11-01'`).
+  - The two resource groups `rg-maa-data` and `rg-maa-env` in `location`.
+  - Module calls to `modules/data.bicep` (scope `rg-maa-data`) and `modules/env.bicep` (scope `rg-maa-env`), with env.bicep receiving data.bicep's outputs.
+  - The outputs `AZURE_CLIENT_ID` (id-maa-github client ID), `AZURE_TENANT_ID` (`tenant().tenantId`), `AZURE_SUBSCRIPTION_ID` (`subscription().subscriptionId`), `serverFqdn` and `jobName`.
+
+  Create both modules as compiling stubs with those params and outputs, so `az bicep build --file infra/main.bicep` succeeds.
+- [X] T006 [P] Create `infra/main.bicepparam` with `using 'main.bicep'` and only non-secret defaults: `location = 'germanywestcentral'`, `githubRepository = 'XaverPilgrimm/market-anomaly-agent'`, `budgetAmountEur = 30`, `budgetStartDate = '2026-11-01'`. It MUST NOT contain the alert email, any tenant ID, subscription ID or object ID, any tenant domain, any IP address or the vendor key (FR-018, FR-022, FR-025). Add a header comment saying so.
+- [X] T007 Create the `checks` job in `.github/workflows/ci.yml`:
+  - Triggers `pull_request` (branches `[main]`), `push` (branches `[main]`) and `workflow_dispatch`.
+  - Top-level `permissions: contents: read`.
+  - Job `checks` on `ubuntu-24.04` with a `postgres:17` service container (`POSTGRES_PASSWORD: postgres`, health check `pg_isready`, port 5432) and env `DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres` (a throwaway CI-only value, not a credential).
+  - Steps:
+    1. `actions/checkout` and `astral-sh/setup-uv`, both pinned to full commit SHAs with a version comment.
+    2. `uv sync --frozen`.
+    3. `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`.
+    4. `uv run pytest`, then `uv run pytest -m integration`.
+    5. `az bicep build --file infra/main.bicep --stdout > /dev/null` (offline; no `azure/login` in this job).
+
+  This covers FR-007 for pull requests and pushes.
+
+  *Extended after T016:* two more steps at the end of `checks`, on every pull request and push, with no push and no registry login:
+    6. `docker build --build-arg GIT_SHA="$GIT_SHA" -f Containerfile -t market-anomaly-agent:ci .`, with `GIT_SHA: ${{ github.sha }}` passed through `env:`. This also runs the Containerfile's CA guard (research R8).
+    7. `docker run --rm market-anomaly-agent:ci --help`, failing the job unless the output has a line matching `^usage: detect .*--latest`.
+    The build pulls `python:3.12-slim-bookworm` and `ghcr.io/astral-sh/uv:0.12.19` (uv binaries only, copied in by T016's build stage). Both are public, so the step still needs no registry login. A missing or mistyped base tag fails this step on the pull request, before anything reaches `main`.
+  *Extended again:* a `Shellcheck host scripts` step before the Bicep build installs shellcheck with `apt-get` only if the runner lacks it, prints its version, and runs `shellcheck -x infra/scripts/*.sh`. Deliberate exceptions are disabled inline with the reason on the line above (SC2016 in `preflight.sh`, where `$d` is a jq variable; SC2069 in `db-bootstrap.sh`, where only stderr is captured).
+
+**Checkpoint**: Bicep compiles, CI runs every check on pull requests, scripts refuse to run in the
+agent container.
+
+---
+
+## Phase 3: User Story 1 - The day's detection runs and is stored without anyone starting it (Priority: P1) 🎯 MVP
+
+**Goal**: a scheduled Container Apps job runs `detect --latest --migrate` as `id-maa-job` against
+an Entra-only PostgreSQL 17 server and stores the most recent completed trading day. Every push to
+`main` that passes the checks publishes an image and switches the job to it.
+
+**Independent Test**: quickstart.md §4, rows US1-1 and US1-2: start the job by hand against a
+database that does not hold the last trading day. The execution succeeds, its log shows the start
+line with mode, day and commit, the migrations are applied, and the day is stored. Rows US1-3 and
+US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job shows that image.
+
+### Tests for User Story 1 ⚠️ write first, see them fail
+
+- [X] T008 [P] [US1] In `tests/unit/test_calendar.py`, add tests for `calendar.latest_completed_trading_day(now: datetime) -> date`. Every input is a timezone-aware datetime, and the expected value is the most recent NASDAQ trading day strictly before the New York calendar date of `now`:
+  - Tue 2026-11-10 11:00 UTC → Mon 2026-11-09.
+  - Sat 2026-11-14 11:00 UTC → Fri 2026-11-13.
+  - Fri 2026-11-27 11:00 UTC (the day after Thanksgiving, an early-close trading day) → Wed 2026-11-25.
+  - Fri 2026-11-27 23:30 New York (`2026-11-28 04:30 UTC`) → Wed 2026-11-25. A trading day's own date is never returned.
+  - 2026-11-10 00:30 UTC (still 2026-11-09 in New York) → Fri 2026-11-06.
+  - Both sides of the 2026-11-01 daylight-saving change: 2026-10-31 11:00 UTC and 2026-11-03 11:00 UTC.
+  - A naive datetime raises `ValueError`.
+- [X] T009 [P] [US1] Create `tests/unit/storage/__init__.py` and `tests/unit/storage/test_db.py` for `storage/db.py` (monkeypatch env vars and `psycopg.connect`, so no connection is opened):
+  - (a) With `DATABASE_AUTH` unset, empty (`DATABASE_AUTH=`) or `password`, `connect()` calls `psycopg.connect(url, autocommit=True)` exactly as before.
+  - (b) With `DATABASE_AUTH=entra`:
+    - `ManagedIdentityCredential` (monkeypatched on `market_anomaly_agent.storage.db`) is constructed with `client_id=$AZURE_CLIENT_ID`.
+    - `get_token` is called with `ENTRA_SCOPE`.
+    - `psycopg.connect` receives the URL plus `password=<token>` and `autocommit=True`.
+    - `db.issued_tokens()` then contains the token.
+    - A second `connect()` calls `get_token` again.
+  - (c) With `entra`, each of these raises `DatabaseConfigError` before `get_token`: `AZURE_CLIENT_ID` missing; `DATABASE_URL` containing a password; `DATABASE_URL` without `sslmode=verify-full`.
+  - (d) Any non-empty `DATABASE_AUTH` value other than `password` or `entra` raises `DatabaseConfigError`.
+  - (e) A `get_token` exception propagates (the CLI maps it to exit 1).
+- [X] T010 [US1] Extend `tests/unit/test_cli.py`, following its existing fakes:
+  - (a) `--date` together with `--latest` → exit 2. Neither → exit 2.
+  - (b) `--latest` with `now=lambda: datetime(2026, 11, 10, 11, 0, tzinfo=UTC)` evaluates 2026-11-09. `run_detection` receives that day, and the output and exit code match a `--date 2026-11-09` run with the same fakes.
+  - (c) The first INFO line is exactly `start mode=latest evaluated_date=2026-11-09 version=abc123` with `APP_COMMIT=abc123`, and ends `version=unknown` when unset. A `--date` run logs `mode=date`.
+  - (d) `--migrate` calls a faked `apply_migrations` once, before `load_universe_tickers` or `load_run`, and logs `applied migration(s): …` or `none`. Without `--migrate` it is not called.
+  - (e) `apply_migrations` raising → exit 1, nothing else called, and the message is scrubbed.
+  - (f) A token registered through a faked `db.issued_tokens()` that appears in a forced exception message is printed as `***` in stderr, including the traceback.
+- [X] T011 [US1] In `tests/integration/test_detect_end_to_end.py`, reuse the `make_detect` and `Detect` pattern, extended so `Detect` can pass extra argv and `now`. Add three tests:
+  - (a) `--latest --migrate` on a fresh, unmigrated schema (use `db_conn`, not `migrated_conn`) creates every table, stores the resolved day, and `schema_migrations` lists `0001_init.sql`.
+  - (b) A second `--migrate` run applies `none`.
+  - (c) `--latest` for a day that is not stored produces the same stored rows as `--date` for that day (compare with `table_contents`).
+
+### Implementation for User Story 1
+
+- [X] T012 [P] [US1] Implement `latest_completed_trading_day(now: datetime) -> date` in `src/market_anomaly_agent/calendar.py`: raise `ValueError` if `now.tzinfo is None`, convert with `zoneinfo.ZoneInfo(_TZ)`, and return `previous_trading_day(ny_date)`. Makes T008 pass.
+- [X] T013 [P] [US1] Implement Entra mode in `src/market_anomaly_agent/storage/db.py` per contracts/cli-contract.md (Environment) and data-model.md §1, making T009 pass:
+  - The constants `AUTH_ENV_VAR`, `CLIENT_ID_ENV_VAR` and `ENTRA_SCOPE`.
+  - A module-level `_issued: list[str]` and `issued_tokens() -> tuple[str, ...]`.
+  - In `connect()`, read `DATABASE_AUTH`; unset or empty means `password` (`os.environ.get(AUTH_ENV_VAR) or "password"`). In `entra` mode, apply data-model.md §1's rules verbatim: "must have no password and must have `sslmode=verify-full`, otherwise exit 1 before connecting" (raise `DatabaseConfigError`), and require `AZURE_CLIENT_ID`. Then get a token with `ManagedIdentityCredential(client_id=…).get_token(ENTRA_SCOPE).token` (imported as `from azure.identity import ManagedIdentityCredential`), append it to `_issued`, and return `psycopg.connect(url, password=token, autocommit=True)`.
+  - Never log the URL or the token. Update the module docstring.
+- [X] T014 [US1] Update `src/market_anomaly_agent/cli.py` per contracts/cli-contract.md, making T010 pass:
+  - A required mutually exclusive argparse group of `--date` and `--latest`, plus `--migrate`.
+  - The `now` keyword parameter.
+  - Resolve the day with `calendar.latest_completed_trading_day(now())` for `--latest`; keep the trading-day check for `--date`.
+  - Log the start line (shared decisions).
+  - Inside the existing `try`, with `--migrate`: `with connect() as conn: applied = apply_migrations(conn)`, then log `applied migration(s): <names or none>`.
+  - Then continue into `_run`.
+  - `_secrets()` also returns every value of `db.issued_tokens()`.
+  - Update the module docstring to name both modes. Exit codes are unchanged.
+- [X] T015 [US1] Run `uv run pytest`, `uv run pytest -m integration` (local PostgreSQL via `podman compose`, as in feature 001), `uv run ruff check`, `uv run ruff format --check` and `uv run mypy`. Everything must pass, T011 included. Fix failures in the files of T012 to T014 only.
+- [X] T016 [P] [US1] Create `Containerfile` per research R12:
+  - Stage `build` from `python:3.12-slim-bookworm`, the same image as the runtime stage, so the venv's interpreter path (`/usr/local/bin/python3.12`) matches. Add uv as uv's Docker guide recommends: `COPY --from=ghcr.io/astral-sh/uv:<version> /uv /uvx /bin/`, with `<version>` the exact uv release in use (`uv --version`, at least two weeks old; now `0.12.19`). *Corrected after the first host build:* the combined tag `ghcr.io/astral-sh/uv:0.12.19-python3.12-bookworm-slim` does not exist ("manifest unknown"), while `ghcr.io/astral-sh/uv:0.12.19` does. `WORKDIR /app`, copy `pyproject.toml`, `uv.lock`, `README.md` and `src/`, then `uv sync --frozen --no-dev --no-editable`.
+  - Stage `runtime` from `python:3.12-slim-bookworm`: `apt-get install --no-install-recommends ca-certificates` and clean the apt lists, create user `app` (uid 10001), copy `/app/.venv` from `build`, and set `PATH=/app/.venv/bin:$PATH`.
+  - CA guard (research R8): right after installing `ca-certificates`, a `RUN` step fails the build unless `/etc/ssl/certs/ca-certificates.crt` contains both roots Microsoft documents for Azure Database for PostgreSQL: `python -c "import ssl; s={dict(x[0] for x in c['subject']).get('commonName') for c in ssl.create_default_context(cafile='/etc/ssl/certs/ca-certificates.crt').get_ca_certs()}; missing={'DigiCert Global Root G2','Microsoft RSA Root Certificate Authority 2017'}-s; assert not missing, missing"`. Do not set `PGSSLROOTCERT`, `SSL_CERT_FILE` or `SSL_CERT_DIR`: the job's `DATABASE_URL` names the file (`sslrootcert=/etc/ssl/certs/ca-certificates.crt`, T018), because `sslrootcert=system` does not find a store with the wheel's bundled OpenSSL.
+  - `ARG GIT_SHA=unknown`, `ENV APP_COMMIT=$GIT_SHA`, and `LABEL org.opencontainers.image.revision=$GIT_SHA` and `org.opencontainers.image.source=https://github.com/XaverPilgrimm/market-anomaly-agent`.
+  - `USER app`, `ENTRYPOINT ["detect"]`, no `CMD`.
+  - No `ENV` with any secret (FR-005).
+- [X] T017 [US1] Implement `infra/modules/data.bicep` per data-model.md §3 "`rg-maa-data`":
+  - User-assigned identity `id-maa-job`.
+  - Server `psql-maa-<u>`: `sku { name: 'Standard_B1ms', tier: 'Burstable' }`, `version: '17'`, `storage { storageSizeGB: 32, autoGrow: 'Disabled' }`, `backup { backupRetentionDays: 7, geoRedundantBackup: 'Disabled' }`, `highAvailability { mode: 'Disabled' }`, `authConfig { activeDirectoryAuth: 'Enabled', passwordAuth: 'Disabled', tenantId: tenant().tenantId }`, `network { publicNetworkAccess: 'Enabled' }`, and no `administratorLogin`.
+  - Child `administrators/${dbAdminGroupObjectId}` with `principalType: 'Group'`, `principalName: dbAdminGroupName` and `tenantId: tenant().tenantId` (research R16).
+  - Child `configurations`: `require_secure_transport` = `on` and `ssl_min_protocol_version` = `TLSv1.2`, deployed one after the other (`dependsOn`), because concurrent configuration updates conflict.
+  - Firewall rules `AllowAllAzureServicesAndResourcesWithinAzureIps` (0.0.0.0–0.0.0.0) and `owner-access` (`ownerAccessIp`–`ownerAccessIp`).
+  - Outputs: `serverFqdn`, `serverName`, `jobIdentityId`, `jobIdentityClientId`, `jobIdentityPrincipalId`.
+
+  No database resource (research R3).
+- [X] T018 [US1] Implement the US1 part of `infra/modules/env.bicep` per data-model.md §3 "`rg-maa-env`" and contracts/deployment-contract.md §4:
+  - `log-maa` (`PerGB2018`, `retentionInDays: 30`).
+  - `cae-maa`: consumption only, `appLogsConfiguration` to `log-maa` with its shared key via `listKeys`.
+  - `kv-maa-<u>`: Standard, `enableRbacAuthorization: true`, `softDeleteRetentionInDays: 7`, `enablePurgeProtection` omitted or false.
+  - Secret `twelve-data-api-key`, created only `if (!empty(twelveDataApiKey))`.
+  - Role assignments: Key Vault Secrets User (`4633458b-17de-408a-b874-0445c86b69e6`) for `jobIdentityPrincipalId`, always scoped to the secret itself: an `existing` reference to `twelve-data-api-key`, with `dependsOn` the conditionally created secret, so the job never gets vault-wide read (*tightened during implementation*; it replaces the earlier "otherwise on the vault", and T025 therefore refuses an empty key while the secret does not exist); Key Vault Secrets Officer (`b86a8fe4-44ce-4948-aee5-eccb2c155cd7`) for `dbAdminGroupObjectId` on the vault with `principalType: 'Group'`. The job's assignment uses `principalType: 'ServicePrincipal'`.
+  - Job `job-maa-detect` with the fixed job settings, user-assigned identity `jobIdentityId`, secret `price-data-api-key` with `keyVaultUrl: '${vault.properties.vaultUri}secrets/twelve-data-api-key'` and `identity: jobIdentityId`, image `jobImage`, and env:
+    - `DATABASE_URL = 'postgresql://id-maa-job@${serverFqdn}:5432/market_anomaly_agent?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'`
+    - `DATABASE_AUTH = 'entra'`
+    - `AZURE_CLIENT_ID = jobIdentityClientId`
+    - `PRICE_DATA_API_KEY` from secretRef `price-data-api-key`
+
+    No `registries` block. The job depends on the secret role assignment.
+- [X] T019 [US1] Add the pipeline identity:
+  - In `infra/main.bicep`, a custom role definition (`Microsoft.Authorization/roleDefinitions`, name `guid(subscription().id, 'maa-job-image-updater')`, role name `Market Anomaly Agent job image updater`), with `actions: ['Microsoft.App/jobs/read', 'Microsoft.App/jobs/write']` and `assignableScopes: [subscription().id]`. Pass its ID to env.bicep.
+  - In `infra/modules/env.bicep`, identity `id-maa-github`.
+  - Its child `federatedIdentityCredentials` `github-main`: issuer `https://token.actions.githubusercontent.com`, `audiences: ['api://AzureADTokenExchange']`, subject `'repo:${githubRepository}:ref:refs/heads/main'`.
+  - A role assignment of the custom role to `id-maa-github` with `scope: job` (FR-008, FR-009, research R7).
+  - The `AZURE_CLIENT_ID` output.
+- [X] T020 [P] [US1] Create `infra/sql/bootstrap.sql` per research R3 steps 1–5. It is idempotent and driven by psql variables `:"job_role"` and `:"admin_role"`, and runs in two connections, split by the script with `\if :{?phase_db}`:
+  - Phase `postgres`:
+    - Create the principal only if `pg_roles` lacks it: `SELECT … pgaadauth_create_principal(:'job_role', false, false) \gexec`, guarded with `\if`.
+    - `CREATE DATABASE market_anomaly_agent` only if it is missing (`\gexec`).
+    - `GRANT CONNECT, TEMPORARY ON DATABASE market_anomaly_agent TO :"job_role"`.
+    - `REVOKE ALL ON DATABASE market_anomaly_agent FROM PUBLIC`.
+    - `GRANT :"job_role" TO :"admin_role" WITH INHERIT TRUE, SET TRUE`.
+  - Phase `market_anomaly_agent`: `GRANT USAGE, CREATE ON SCHEMA public TO :"job_role"`.
+  - Finally, a `DO` block that raises an exception unless `has_schema_privilege(:'job_role', 'public', 'CREATE')` and `pg_has_role(current_user, :'job_role', 'USAGE')` are both true. psql runs with `-v ON_ERROR_STOP=1`.
+- [X] T021 [P] [US1] Create `infra/scripts/db-access.sh` (sources `_common.sh`; `open|close`):
+  - `open` gets the owner's public IP from `curl -fsS https://api.ipify.org`, checks it is a valid IPv4 address, and runs `az postgres flexible-server firewall-rule update -g rg-maa-data -n <server> -r owner-access --start-ip-address <ip> --end-ip-address <ip>`.
+  - `close` sets `192.0.2.1`.
+  - The rule is never deleted, because the lock blocks deletion (research R14).
+  - The server name is read with `az postgres flexible-server list -g rg-maa-data --query "[0].name" -o tsv`.
+- [X] T022 [P] [US1] Create `infra/scripts/entra-bootstrap.sh` (sources `_common.sh`; `require_az_login`) per contracts/deployment-contract.md §2a and research R16. It is idempotent:
+  - `uid=$(az ad signed-in-user show --query id -o tsv)`, read at run time and never printed.
+  - Create the security group if `az ad group show --group maa-db-admins` fails: `az ad group create --display-name maa-db-admins --mail-nickname maa-db-admins`.
+  - Add the signed-in user unless `az ad group member check --group maa-db-admins --member-id "$uid" --query value -o tsv` prints `true`: `az ad group member add --group maa-db-admins --member-id "$uid"`.
+  - If `az ad group member list --group maa-db-admins --query "[].id" -o tsv` lists any ID other than `$uid`, exit 1 with `maa-db-admins must have exactly one member` and change nothing.
+  - Print `admin group ok`. No object, tenant or subscription ID appears in output or in the file.
+- [X] T023 [US1] Create `infra/scripts/db-bootstrap.sh` (sources `_common.sh`, depends on T020):
+  - Get `PGPASSWORD` with `az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv`.
+  - Run `bootstrap.sql` through `pg_client psql "host=<server-fqdn> dbname=postgres user=maa-db-admins sslmode=verify-full sslrootcert=system" -v ON_ERROR_STOP=1 -v job_role=id-maa-job -v admin_role=maa-db-admins -v phase_db=postgres -f -` (file piped on stdin), then again with `dbname=market_anomaly_agent` and without `phase_db`.
+  - Read the server FQDN at run time (`az postgres flexible-server list -g rg-maa-data --query "[0].fullyQualifiedDomainName" -o tsv`).
+  - On an authentication failure of the first connection, print the check Q7 fallback from quickstart.md §2 (work account in the group) and exit 1.
+  - Print `bootstrap ok` only if both succeed. Remind the owner to run `db-access.sh close`.
+- [X] T024 [US1] Create `infra/scripts/preflight.sh <region>` (sources `_common.sh`) for quickstart check Q1. Print PASS or FAIL per item and exit non-zero on any FAIL:
+  - `az postgres flexible-server list-skus -l <region>` must list `Standard_B1ms` in tier `Burstable`, and version `17` must be supported in that region.
+  - `az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='jobs'].locations"` must contain the region's display name.
+  - It prints the subscription's display name (`az account show --query name -o tsv`), never its ID or the tenant ID.
+- [X] T025 [US1] Create `infra/scripts/deploy.sh` (depends on T022) per contracts/deployment-contract.md §3 (sources `_common.sh`; `require_az_login`):
+  - *Added later:* pass `githubRepository` from `gh repo view --json nameWithOwner -q .nameWithOwner` (run in the repository root), not from `main.bicepparam`, and exit 1 if `gh` cannot read it. The federated credential's subject must equal the OIDC token's `sub` claim exactly, including case. The GHCR image name in `ci.yml` stays lowercase, as GHCR requires. The what-if header prints the repository name.
+  - First run `infra/scripts/entra-bootstrap.sh`, and stop if it fails.
+  - `dbAdminGroupObjectId` from `az ad group show --group maa-db-admins --query id -o tsv`, at run time.
+  - Alert email from `$MAA_ALERT_EMAIL`, or `read -r` if unset.
+  - Refuse to deploy (exit 1, before the what-if) when `dbAdminGroupObjectId` or the alert email is empty. `infra/main.bicepparam` sets both to `''` only because a parameter file must give a value for every required parameter, so an empty value always means the run-time lookup or the prompt failed.
+  - Vendor key from `read -rs`; empty keeps the stored secret. Refuse to deploy when the key is empty and `twelve-data-api-key` does not exist yet (first deployment, or after teardown purged the vault), because the job's role assignment is scoped to that secret (T018).
+  - `jobImage` from `az containerapp job show -n job-maa-detect -g rg-maa-env --query "properties.template.containers[0].image" -o tsv`, falling back to the placeholder when the job does not exist.
+  - Run `az deployment sub what-if -l <location> -n maa-<timestamp> -f infra/main.bicep -p infra/main.bicepparam -p dbAdminGroupObjectId=… alertEmail=… jobImage=… twelveDataApiKey="$KEY"`.
+  - Then run `az deployment sub create … --confirm-with-what-if` with the same parameters.
+  - Print the outputs, then offer `gh variable set AZURE_CLIENT_ID|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID --body …` (y/N each).
+  - Print the next steps: `db-access.sh open`, `db-bootstrap.sh`, `db-access.sh close`, `gh workflow run ci.yml --ref main`, and set the GHCR package to public.
+  - Never echo the key, the email or any object, tenant or subscription ID. The `gh variable set` values are passed straight from the deployment outputs.
+- [X] T026 [US1] Add the `publish-deploy` job to `.github/workflows/ci.yml` per contracts/deployment-contract.md §5:
+  - *Added later:* `concurrency: { group: publish-deploy, cancel-in-progress: false }`, so two quick merges deploy one after the other and no deployment is cancelled midway. GitHub keeps one run in progress and one pending; a third queued run replaces the pending one, so the newest commit is the one that ends up deployed.
+  - `needs: checks`; `if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AZURE_CLIENT_ID != '' && vars.AZURE_TENANT_ID != '' && vars.AZURE_SUBSCRIPTION_ID != ''`. *Added after implementation:* while any of the three repository variables that `deploy.sh` sets is empty (before the first deployment), the whole job is skipped, so the merge to `main` before T028 shows a skipped job rather than a failed run. Nothing is pushed in that case. After `deploy.sh` has set the variables, `gh workflow run ci.yml --ref main` (T028) runs it; `permissions: contents: read, packages: write, id-token: write`; no `environment:` key.
+  - Steps (actions pinned to commit SHAs):
+    1. Checkout.
+    2. `docker/login-action` to `ghcr.io` with `${{ github.actor }}` and `${{ secrets.GITHUB_TOKEN }}`.
+    3. `docker build --build-arg GIT_SHA=${{ github.sha }} -f Containerfile -t ghcr.io/xaverpilgrimm/market-anomaly-agent:${{ github.sha }} .`, then `docker push` of that tag.
+    4. `azure/login` with `client-id: ${{ vars.AZURE_CLIENT_ID }}`, `tenant-id: ${{ vars.AZURE_TENANT_ID }}` and `subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}`.
+    5. `az containerapp job update -n job-maa-detect -g rg-maa-env --image ghcr.io/xaverpilgrimm/market-anomaly-agent:${{ github.sha }}`.
+- [ ] T027 [US1] (owner, host) Run the pre-deployment checks from quickstart.md §1:
+  - Q1: `infra/scripts/preflight.sh germanywestcentral`. On FAIL, try `westeurope`, then `northeurope`, then `swedencentral`, and set `location` in `infra/main.bicepparam` to the first that passes.
+  - Q2: price the resources in the Azure pricing calculator in EUR. The total must be ≤ EUR 24.
+  - Q6: run `infra/scripts/deploy.sh` and answer **n** at the confirmation. (Expect that the later real run in T028 may need a second attempt while a role assignment propagates; see quickstart.md Q6.) `entra-bootstrap.sh` must print `admin group ok` (the group `maa-db-admins` now exists with you as its only member). The what-if must list only data-model.md §3 resources, with a `Group` Entra administrator.
+
+  Record the region and the real EUR prices in `specs/002-azure-daily-run/research.md` (R2, R10).
+- [ ] T028 [US1] (owner, host) Run the first deployment from quickstart.md §2:
+  1. `infra/scripts/deploy.sh` (answer **y**), and set the three GitHub variables. The first run can fail while the new Key Vault role assignment for `id-maa-job` propagates (for example, the job cannot read its secret reference); `deploy.sh` is idempotent, so wait a few minutes and run it again.
+  2. `infra/scripts/db-access.sh open`, `infra/scripts/db-bootstrap.sh` (must print `bootstrap ok`; this is check Q7 part 1, the first sign-in as `maa-db-admins`; on failure follow the work-account fallback in quickstart.md §2), `infra/scripts/db-access.sh close`.
+  3. `gh workflow run ci.yml --ref main`, then set the GHCR package `market-anomaly-agent` to public.
+  4. Check Q7 part 2 (quickstart.md §2): with `db-access.sh open`, a `verify-full` connection from the published image using `sslrootcert=/etc/ssl/certs/ca-certificates.crt` succeeds and reports `ssl = true`, and the same connection with `sslrootcert=/dev/null` fails with a certificate error. Then `db-access.sh close`. On failure, apply the fallback in research R8.
+  5. Check Q5: `publish-deploy` succeeds with the custom role only. If it fails with an authorization error, add exactly the missing action to the role in `infra/main.bicep`, record it in research R7, and redeploy.
+- [ ] T029 [US1] (owner, host) Validate US1 per quickstart.md §4 rows US1-1/US1-2 and US1-3/US1-5/SC-010:
+  - A manual `az containerapp job start -n job-maa-detect -g rg-maa-env` succeeds, its log shows the start line with the commit and the applied migration, and the owner query shows the day in `detection_runs`.
+  - A pull request runs `checks` only.
+  - A merge publishes `:<sha>` and the job shows that image.
+
+**Checkpoint**: the daily run works end to end. A repeated start still re-fetches and reproduces
+the day; US2 removes that cost.
+
+---
+
+## Phase 4: User Story 2 - Repeated starts and non-trading days cost nothing (Priority: P1)
+
+**Goal**: in `--latest` mode, a day that is already stored exits 0 with no vendor request, no
+write and no exit 3 (FR-002).
+
+**Independent Test**: quickstart.md §4, rows US2/SC-002 and US2/SC-003: a second start right after
+a successful one finishes in under 2 minutes, uses 0 vendor credits and adds no rows.
+
+### Tests for User Story 2 ⚠️ write first, see them fail
+
+- [ ] T030 [P] [US2] Extend `tests/unit/test_cli.py` with a faked `load_run` that returns a `StoredRun` for the resolved day, under `--latest`:
+  - The source factory is never called, `PRICE_DATA_API_KEY` may be unset, `load_universe_tickers`, `run_detection`, `load_bar_snapshot` and `save_run` are not called, and the exit code is 0.
+  - The last stdout line equals the stored summary.
+  - The INFO line `2026-11-09 already stored; nothing fetched` is logged.
+  - The holiday case: `now` on Fri 2026-11-27 11:00 UTC resolves to 2026-11-25, which is stored, so exit 0.
+  - With `--date` and the same stored run, the 001 reproduce path still runs (`run_detection` is called).
+- [ ] T031 [P] [US2] Extend `tests/integration/test_detect_end_to_end.py`:
+  - After a first `--latest` run stores the day, change a bar in the fake source (as the existing exit-3 test does). A second `--latest` run exits 0 (not 3), the fake source records 0 calls, and `table_contents` is unchanged.
+
+### Implementation for User Story 2
+
+- [ ] T032 [US2] In `src/market_anomaly_agent/cli.py`, for `--latest` after the optional migrations and before reading `PRICE_DATA_API_KEY`: open `connect()`, `load_run(conn, day)`, and if it is found, log the already-stored line, print `_stored_summary(stored)` and return `EXIT_OK`. Otherwise call `_run` unchanged. Move the API-key check so it is reached only on the fetch path. Makes T030 and T031 pass. Then rerun the T015 command set.
+- [ ] T033 [US2] (owner, host) Validate quickstart.md §4 rows US2/SC-002 and US2/SC-003 after the pipeline has deployed the T032 image: a second manual start succeeds in under 2 minutes, with "already stored" in the log, 0 new Twelve Data credits and unchanged row counts.
+
+**Checkpoint**: repeated starts and holidays are free; US1 and US2 together are the complete daily
+run.
+
+---
+
+## Phase 5: User Story 3 - A failed run is retried a bounded number of times and reported (Priority: P2)
+
+**Goal**: at most 3 attempts per execution, a time limit that fits all 3, and an email within
+15 minutes when an execution fails (FR-011, FR-022, SC-004, SC-011).
+
+**Independent Test**: quickstart.md §3 Q3 and Q4, and §4 row US3/SC-008: with an invalid key, an
+execution makes at most 3 attempts, stores nothing, and the owner gets a failure email.
+
+### Implementation for User Story 3
+
+- [ ] T034 [US3] In `infra/modules/env.bicep`, add action group `ag-maa-owner`: short name `maa`, one email receiver from `alertEmail`, `useCommonAlertSchema: true`.
+- [ ] T035 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-execution-failed` (research R9):
+  - Scope `log-maa`; `evaluationFrequency: 'PT5M'`; `windowSize: 'PT10M'`; severity 2; action `ag-maa-owner`; `autoMitigate: false`.
+  - Query: `ContainerAppSystemLogs_CL | where JobName_s == 'job-maa-detect' | where Reason_s has_any (dynamic(['Failed','BackOff','Error','Timeout','DeadlineExceeded'])) or Log_s has_any (dynamic(['failed','timed out','deadline'])) | project TimeGenerated, ExecutionName_s, Reason_s, Log_s`, with the condition count > 0.
+  - Add a Bicep comment that the reason strings are provisional until check Q4 (T039) pins them.
+- [ ] T036 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-no-completed-run` (research R9):
+  - Scope `log-maa`; `evaluationFrequency: 'PT1H'`; `windowSize: 'PT2H'`; severity 2; action `ag-maa-owner`.
+  - The query returns one row only when all of these hold:
+    - `dayofweek(now())` is Tuesday to Saturday (2d to 6d);
+    - `now()` is between today's 12:45 and 13:45 UTC;
+    - `ContainerAppConsoleLogs_CL | where ContainerJobName_s == 'job-maa-detect' and TimeGenerated >= startofday(now()) + 11h and Log_s has 'status=completed'` returns no rows.
+
+    Write it as `let completed = toscalar(…| count); print fire = …| where fire`. Add a comment that the column name `ContainerJobName_s` is confirmed in Q4.
+- [ ] T037 [US3] (owner, host) Run check Q3 from quickstart.md §3: create a temporary job copy in `rg-maa-env` with `replicaTimeout 120`, `replicaRetryLimit 2` and image `docker.io/library/busybox:1.37` running `sh -c 'sleep 50; exit 1'`. Start it once, count the replicas, and delete it.
+  - 3 replicas: set `jobReplicaTimeoutSeconds = 1800` in `infra/main.bicepparam` and redeploy.
+  - 2 replicas: keep 3600.
+
+  Record the observed behaviour and the final value in `specs/002-azure-daily-run/research.md` R1.
+- [ ] T038 [US3] (owner, host) Redeploy with `infra/scripts/deploy.sh` so the alerts from T034–T036 exist (empty key input keeps the secret).
+- [ ] T039 [US3] Run check Q4 from quickstart.md §3, in two parts:
+  - (owner, host) Start the job once with failing args (`--date 2026-11-08`, a Sunday, exit 2 on every attempt). Confirm a failure email within 15 minutes. Then query `log-maa` and copy the real `Reason_s` values and column names of the failed attempts and execution.
+  - (agent, from the owner's notes) Pin those values in the queries of `infra/modules/env.bicep` (T035 and T036), and record them in research R9.
+- [ ] T040 [US3] (owner, host) Validate quickstart.md §4 row US3/SC-008: set an invalid value with `az keyvault secret set`, start once, and confirm ≤ 3 attempts, nothing stored and a failure email. Then restore the real key.
+
+**Checkpoint**: failures are bounded, stopped in time and reported.
+
+---
+
+## Phase 6: User Story 4 - The whole environment can be deleted and recreated from the repository (Priority: P2)
+
+**Goal**: the environment group can be torn down and rebuilt at once, the database group is locked
+and survives, and a separate decommission exports before deleting, with a restore path (FR-024 to
+FR-027, FR-030 to FR-032).
+
+**Independent Test**: quickstart.md §4, rows US4-2 to US4-5 and SC-005, and §5 / SC-009.
+
+### Implementation for User Story 4
+
+- [ ] T041 [US4] In `infra/modules/data.bicep`, add `Microsoft.Authorization/locks` `lock-maa-data` at resource-group scope (no `scope` property, so it applies to `rg-maa-data`) with `level: 'CanNotDelete'` and notes `Stored detection results; see deployment-contract.md §6 (decommission)`. It is deployed on every run, so it is in place after every deployment (FR-030).
+- [ ] T042 [P] [US4] Create `infra/scripts/teardown.sh` (sources `_common.sh`):
+  - Print what will be deleted and require typing `rg-maa-env` to confirm.
+  - `az group delete -n rg-maa-env --yes`, then purge the soft-deleted vault: `az keyvault list-deleted --query "[?name=='kv-maa-<u>']"`, then `az keyvault purge -n <name> -l <location>`. Read the vault name from `az keyvault list -g rg-maa-env` before the delete.
+  - Never reference `rg-maa-data`, and say so in a comment (FR-027).
+- [ ] T043 [P] [US4] Create `infra/scripts/decommission.sh <dump-path>` (sources `_common.sh`):
+  1. Resolve the path with `realpath -m`. Refuse it if it is inside `repo_root`. Refuse an existing file.
+  2. Run `teardown.sh`.
+  3. `db-access.sh open`.
+  4. `pg_dump -Fc` signed in as `maa-db-admins` with the owner's token, writing to the path through a bind-mounted directory of the `pg_client` container.
+  5. Verify the file is non-empty and that `pg_restore --list` exits 0.
+  6. Require typing `rg-maa-data` to confirm.
+  7. `az lock delete -n lock-maa-data -g rg-maa-data`, then `az group delete -n rg-maa-data --yes`.
+
+  Stop at the first failure, before step 7. Never upload the file (FR-031).
+- [ ] T044 [P] [US4] Create `infra/scripts/restore.sh <dump-path>` (sources `_common.sh`):
+  - Require an existing, non-empty file.
+  - `db-access.sh open`.
+  - Refuse if `SELECT to_regclass('public.detection_runs')` is non-null and the table has rows.
+  - `pg_restore --no-owner --role=id-maa-job --exit-on-error -d "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=system"`.
+  - Print `SELECT count(*) FROM detection_runs`, then `db-access.sh close` (FR-032).
+- [ ] T045 [US4] (owner, host) Validate quickstart.md §4 rows US4-2, US4-3/4/SC-005 and US4-5/FR-030:
+  - A rerun of `deploy.sh` shows a what-if with no changes.
+  - `teardown.sh`, then at once `deploy.sh` and `gh workflow run ci.yml --ref main`, then a manual start, reports the last stored day as "already stored", with all earlier days present and no bootstrap needed.
+  - `az group delete -n rg-maa-data` is refused by the lock.
+- [ ] T046 [US4] (owner, host, optional; only when actually pausing) Validate quickstart.md §5 / SC-009: decommission to a path outside the repository, redeploy, bootstrap, restore, and compare the `detection_runs` counts.
+
+**Checkpoint**: the environment is disposable, and the results are not.
+
+---
+
+## Phase 7: User Story 5 - Spending stays within the constitution's caps and is visible (Priority: P3)
+
+**Goal**: a EUR 30 monthly budget with actual-cost notifications at 50, 80 and 100%, and a
+documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
+
+**Independent Test**: quickstart.md §4 row US5/FR-028.
+
+### Implementation for User Story 5
+
+- [ ] T047 [US5] In `infra/main.bicep`, add `Microsoft.Consumption/budgets` `budget-maa-monthly` at subscription scope:
+  - `category: 'Cost'`, `amount: budgetAmountEur`, `timeGrain: 'Monthly'`, `timePeriod { startDate: budgetStartDate }`.
+  - Three notifications, `actual50`, `actual80` and `actual100`: `enabled: true`, `operator: 'GreaterThanOrEqualTo'`, `threshold` 50, 80 and 100, `thresholdType: 'Actual'`, `contactEmails: [alertEmail]`.
+
+  The amount is in the billing currency, EUR (constitution v1.2.0).
+- [ ] T048 [P] [US5] Add an "Azure daily run" section to `README.md`:
+  - What runs where and when (Tuesday to Saturday, 11:00 UTC).
+  - The deploy, operate, teardown and decommission entry points, with links to `specs/002-azure-daily-run/quickstart.md` and `contracts/deployment-contract.md`.
+  - The cost table from research R10 in EUR (GHCR, about EUR 19 per month against the EUR 30 cap).
+  - The sentence "Azure budgets only send notifications; they do not stop spending." (FR-028).
+  - The note that every `az` and deployment command runs on the host only.
+- [ ] T049 [US5] (owner, host) Validate quickstart.md §4 row US5/FR-028: `az consumption budget show --budget-name budget-maa-monthly` shows EUR 30 with the three actual-cost notifications.
+
+**Checkpoint**: all five stories delivered.
+
+---
+
+## Phase 8: Polish & Cross-Cutting Concerns
+
+- [ ] T050 [P] Update the "Getting started" section of `README.md` so it lists both modes (`uv run detect --date …` and `uv run detect --latest`, optionally with `--migrate`) and links the 002 CLI contract next to the 001 one.
+- [ ] T051 [P] In `specs/001-nasdaq100-anomaly-detection/quickstart.md`, add one note under its run instructions that `--migrate` can replace the separate `python -m market_anomaly_agent.storage.migrate` step. Change nothing else in feature 001's documents.
+- [ ] T052 (owner, host) Validate SC-007 from quickstart.md §4:
+  - `podman image inspect` and an `env` listing of the image show no key.
+  - A search of the Actions logs and `log-maa` for the key finds nothing.
+  - A password login with `psql` is refused.
+  - `workflow_dispatch` on a non-`main` branch fails at `azure/login` with `AADSTS70021`.
+- [ ] T053 (owner, host) Run quickstart.md §6 (the local workflow is unchanged), then let the schedule run for a week to confirm SC-001 (5 trading days stored with no manual action).
+- [ ] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
+  - No secret in any committed file (`git grep -nE 'td-|PASSWORD=|AccountKey'` reviewed by hand).
+  - No personal or tenant identifier in any file (research R16): `git grep -nE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'` may only find Microsoft's documented built-in role definition IDs; `git grep -niE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|onmicrosoft\.com'` finds no email address of the owner and no tenant domain. Known, allowed hits: `noreply@` attribution lines, the vendor's public contact address in feature 001's research.md, and the fake `user:password@host` connection strings in tests and examples.
+  - Type hints on every new function.
+  - Every new test passed only after being seen failing.
+
+  Record any deviation with its justification in `specs/002-azure-daily-run/plan.md`, Complexity Tracking.
+
+---
+
+## Dependencies & Execution Order
+
+### Phase dependencies
+
+- **Setup (Phase 1)** → **Foundational (Phase 2)** → user stories.
+- **US1 (Phase 3)** depends on Phase 2. It is the MVP and the base for every later story: the
+  later stories add to `cli.py`, `env.bicep`, `data.bicep` and `main.bicep`, which US1 creates.
+- **US2 (Phase 4)** depends on US1's T014 (the CLI modes). Its validation T033 depends on T028
+  (deployed environment).
+- **US3 (Phase 5)** depends on US1's T018 (job and workspace exist). T037 to T040 depend on T028.
+- **US4 (Phase 6)** depends on US1 (T017, T025). T045 depends on T028 and, for "already stored",
+  on US2.
+- **US5 (Phase 7)** depends on Phase 2 (T005) only. It can be built in parallel with US2 to US4.
+- **Polish (Phase 8)** after all desired stories.
+
+### Within each story
+
+- Tests (T008–T011, T030–T031) are written first and seen failing, then the implementation.
+- Bicep tasks on the same file run in order: data.bicep T017 → T041; env.bicep T018 → T019 →
+  T034 → T035 → T036 → T039; main.bicep T005 → T019 → T047.
+- Owner tasks come after the code they validate has been merged to `main` and deployed by the
+  pipeline.
+
+### Parallel opportunities
+
+- Phase 1: T002 and T003.
+- Phase 2: T006 alongside T004 and T007.
+- US1 tests: T008 and T009 together (T010 and T011 touch the shared cli and e2e files, so they run
+  one after the other).
+- US1 implementation: T012 and T013 together. T016, T020, T021 and T022 alongside the Bicep tasks.
+- US2: T030 and T031 together.
+- US4: T042, T043 and T044 together.
+- US5: T048 alongside T047. US5 as a whole alongside US2 to US4.
+
+## Parallel Example: User Story 1
+
+```text
+# Write the failing tests first, in parallel:
+Task: "T008 [US1] latest_completed_trading_day tests in tests/unit/test_calendar.py"
+Task: "T009 [US1] Entra-mode tests in tests/unit/storage/test_db.py"
+
+# Then implement in parallel:
+Task: "T012 [US1] latest_completed_trading_day in src/market_anomaly_agent/calendar.py"
+Task: "T013 [US1] Entra mode in src/market_anomaly_agent/storage/db.py"
+
+# Independent of the Python work, in parallel:
+Task: "T016 [US1] Containerfile"
+Task: "T020 [US1] infra/sql/bootstrap.sql"
+Task: "T021 [US1] infra/scripts/db-access.sh"
+Task: "T022 [US1] infra/scripts/entra-bootstrap.sh"
+```
+
+## Implementation Strategy
+
+### MVP first (User Story 1)
+
+1. Phases 1 and 2.
+2. Phase 3 up to T026. That is all agent work, reviewed and committed by the owner, then merged
+   through a pull request.
+3. Owner tasks T027 to T029 on the host. **Stop and validate**: one manual execution stores a day.
+
+### Incremental delivery
+
+1. US1: the daily run works (a repeated start re-fetches but is safe, since 001 reproduces).
+2. US2: repeated starts and holidays become free. US1 and US2 make up the complete P1 scope.
+3. US3: bounded retries are verified and alerts are live.
+4. US4: teardown, rebuild, lock and decommission.
+5. US5: budget and cost documentation (can land earlier, as it only needs T005).
+
+### Notes
+
+- [P] tasks touch different files and depend on no incomplete task.
+- Owner tasks are the only ones that touch Azure, GitHub settings or the real database.
+- Claude Code never commits, pushes or merges. The owner reviews each change and commits.

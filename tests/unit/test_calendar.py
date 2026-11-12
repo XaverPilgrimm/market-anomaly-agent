@@ -1,5 +1,8 @@
-from datetime import date
+from datetime import UTC, date, datetime
 
+import pytest
+
+from market_anomaly_agent import calendar
 from market_anomaly_agent.calendar import (
     fetch_window_start,
     is_trading_day,
@@ -55,3 +58,65 @@ def test_fetch_window_start_is_121_trading_days_before() -> None:
     assert start == trading_days_before(d, 121)[0]
     # 121 days before plus the evaluated day itself.
     assert len(trading_days_between(start, d)) == 122
+
+
+# latest_completed_trading_day: the most recent NASDAQ trading day strictly before the New York
+# calendar date of `now` (002 spec FR-001, contracts/cli-contract.md).
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        pytest.param(
+            datetime(2026, 11, 10, 11, 0, tzinfo=UTC), date(2026, 11, 9), id="tuesday-to-monday"
+        ),
+        pytest.param(
+            datetime(2026, 11, 14, 11, 0, tzinfo=UTC), date(2026, 11, 13), id="saturday-to-friday"
+        ),
+        pytest.param(
+            # Fri 2026-11-27 is the early-close day after Thanksgiving (Thu 2026-11-26).
+            datetime(2026, 11, 27, 11, 0, tzinfo=UTC),
+            date(2026, 11, 25),
+            id="morning-after-holiday",
+        ),
+        pytest.param(
+            # 23:30 New York on trading day 2026-11-27: that day's own date is never returned.
+            datetime(2026, 11, 28, 4, 30, tzinfo=UTC),
+            date(2026, 11, 25),
+            id="late-evening-of-a-trading-day",
+        ),
+        pytest.param(
+            # 00:30 UTC on 2026-11-10 is still 2026-11-09 (19:30 EST) in New York.
+            datetime(2026, 11, 10, 0, 30, tzinfo=UTC),
+            date(2026, 11, 6),
+            id="new-york-date-behind-utc-date",
+        ),
+        pytest.param(
+            # Before the 2026-11-01 change (EDT, UTC-4): 04:30 UTC is 00:30 on Fri 2026-10-30.
+            # Under EST it would still be Thursday, giving 2026-10-28.
+            datetime(2026, 10, 30, 4, 30, tzinfo=UTC),
+            date(2026, 10, 29),
+            id="before-dst-change-uses-edt",
+        ),
+        pytest.param(
+            # After the change (EST, UTC-5): 04:30 UTC is 23:30 on Mon 2026-11-02.
+            # Under EDT it would already be Tuesday, giving 2026-11-02.
+            datetime(2026, 11, 3, 4, 30, tzinfo=UTC),
+            date(2026, 10, 30),
+            id="after-dst-change-uses-est",
+        ),
+        pytest.param(
+            datetime(2026, 10, 31, 11, 0, tzinfo=UTC), date(2026, 10, 30), id="saturday-before-dst"
+        ),
+        pytest.param(
+            datetime(2026, 11, 3, 11, 0, tzinfo=UTC), date(2026, 11, 2), id="tuesday-after-dst"
+        ),
+    ],
+)
+def test_latest_completed_trading_day(now: datetime, expected: date) -> None:
+    assert calendar.latest_completed_trading_day(now) == expected
+
+
+def test_latest_completed_trading_day_rejects_a_naive_datetime() -> None:
+    with pytest.raises(ValueError):
+        calendar.latest_completed_trading_day(datetime(2026, 11, 10, 11, 0))

@@ -2,6 +2,11 @@
 
 **Feature**: [../spec.md](../spec.md)
 
+> **Amended by feature 002**: `--latest` and `--migrate` modes and the Entra database
+> authentication are added in
+> [002 cli-contract](../../002-azure-daily-run/contracts/cli-contract.md), which replaces the
+> "No other mode of operation exists" rule below. Everything else here still holds.
+
 ## Invocation
 
 ```

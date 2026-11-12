@@ -1,4 +1,8 @@
-"""`detect --date YYYY-MM-DD` (contracts/cli-contract.md).
+"""`detect --date YYYY-MM-DD | --latest [--migrate]` (001 and 002 contracts/cli-contract.md).
+
+`--date` evaluates the given trading day. `--latest` resolves the most recent completed NASDAQ
+trading day in New York time itself (002 FR-001). `--migrate` applies pending database migrations
+first (002 FR-006).
 
 Exit codes: 0 completed or reproduced, 1 unexpected error, 2 usage error, 3 re-run rejected
 because the price data changed (FR-018), 4 input data unusable for the day (FR-022, FR-023).
@@ -19,8 +23,10 @@ from market_anomaly_agent import calendar
 from market_anomaly_agent.data.source import PriceDataError, PriceDataSource
 from market_anomaly_agent.data.twelvedata_source import TwelveDataPriceDataSource
 from market_anomaly_agent.detection import RunAbortedError, run_detection, snapshots_match
+from market_anomaly_agent.storage import db
 from market_anomaly_agent.storage.db import ENV_VAR as DATABASE_URL_VAR
 from market_anomaly_agent.storage.db import connect
+from market_anomaly_agent.storage.migrate import apply_migrations
 from market_anomaly_agent.storage.repository import (
     StoredRun,
     load_bar_snapshot,
@@ -35,6 +41,7 @@ from market_anomaly_agent.universe.constituents import (
 )
 
 API_KEY_VAR = "PRICE_DATA_API_KEY"
+COMMIT_ENV_VAR = "APP_COMMIT"
 UNIVERSE_DIR = Path(__file__).parent / "universe"
 EXPECTED_UNIVERSE_SIZE = 100  # rows in the committed Nasdaq-100 snapshot (FR-001, FR-002)
 
@@ -70,6 +77,7 @@ def _secrets() -> list[str]:
         values.append(urlsplit(values[1]).password or "")
     except ValueError:
         pass
+    values.extend(db.issued_tokens())  # Entra access tokens (002 FR-023)
     # Longest first, so a password inside the URL does not leave the rest of the URL behind.
     return sorted((v for v in values if v), key=len, reverse=True)
 
@@ -122,28 +130,55 @@ def _configure_logging() -> None:
     log.setLevel(logging.INFO)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     source_factory: Callable[[str], PriceDataSource] | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> int:
     _configure_logging()
     parser = _ArgumentParser(prog="detect", description=__doc__.splitlines()[0])
-    parser.add_argument("--date", required=True, type=_parse_date, help="evaluated trading day")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--date", type=_parse_date, help="evaluated trading day")
+    mode.add_argument(
+        "--latest",
+        action="store_true",
+        help="evaluate the most recent completed trading day in New York time",
+    )
+    parser.add_argument(
+        "--migrate", action="store_true", help="apply pending database migrations first"
+    )
     try:
         args = parser.parse_args(argv)
     except _UsageError as exc:
         print(f"detect: error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    evaluated_date: date = args.date
-    if not calendar.is_trading_day(evaluated_date):
-        print(
-            f"detect: error: {evaluated_date.isoformat()} is not a NASDAQ trading day",
-            file=sys.stderr,
-        )
-        return EXIT_USAGE
+    if args.latest:
+        evaluated_date = calendar.latest_completed_trading_day((now or _utc_now)())
+    else:
+        evaluated_date = args.date
+        if not calendar.is_trading_day(evaluated_date):
+            print(
+                f"detect: error: {evaluated_date.isoformat()} is not a NASDAQ trading day",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+    log.info(
+        "start mode=%s evaluated_date=%s version=%s",
+        "latest" if args.latest else "date",
+        evaluated_date.isoformat(),
+        os.environ.get(COMMIT_ENV_VAR) or "unknown",
+    )
 
     try:
+        if args.migrate:
+            with connect() as conn:
+                applied = apply_migrations(conn)
+            log.info("applied migration(s): %s", ", ".join(applied) or "none")
         return _run(evaluated_date, source_factory or TwelveDataPriceDataSource)
     except RunAbortedError as exc:
         log.error("run for %s aborted, nothing stored: %s", evaluated_date, _scrub(str(exc)))
