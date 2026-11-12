@@ -1,7 +1,9 @@
 // rg-maa-data: the database and the job's identity. Locked and kept by teardown (FR-030).
 // Design: specs/002-azure-daily-run/data-model.md §3 and research.md R3, R4, R8, R14, R16.
-// The database `market_anomaly_agent` itself is created by infra/sql/bootstrap.sql, not here
-// (research R3). The CanNotDelete lock is added by tasks.md T040.
+// The database `market_anomaly_agent` is deliberately NOT a resource here: infra/sql/bootstrap.sql
+// creates it signed in as maa-db-admins, so that group owns it and its public schema and can grant
+// CREATE on public to id-maa-job. A database created by ARM would have another owner, the
+// bootstrap would skip its CREATE DATABASE, and that grant could fail (research R3).
 
 @description('Azure region.')
 param location string
@@ -118,6 +120,18 @@ resource ownerAccess 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@20
   dependsOn: [
     allowAzure
   ]
+}
+
+// FR-030: from the first deployment on, nothing in this group can be deleted without first
+// removing the lock (decommission.sh, tasks.md T043, does that after an export). No `scope`, so it
+// applies to the whole resource group. Updates are still allowed, which is why the owner-access
+// firewall rule is moved, never deleted (research R14).
+resource lock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: 'lock-maa-data'
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Stored detection results; see specs/002-azure-daily-run/contracts/deployment-contract.md §6 (decommission).'
+  }
 }
 
 output serverFqdn string = server.properties.fullyQualifiedDomainName

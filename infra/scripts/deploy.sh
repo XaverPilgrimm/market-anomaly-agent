@@ -55,8 +55,18 @@ if [[ -z $alert_email ]]; then
     exit 1
 fi
 
-read -r -s -p "Twelve Data API key (empty keeps the stored key): " api_key
+# IFS= keeps leading and trailing whitespace, so a stray space or tab from a paste is caught below
+# instead of being trimmed silently.
+IFS= read -r -s -p "Twelve Data API key (empty keeps the stored key): " api_key
 echo
+if [[ -n $api_key ]]; then
+    if [[ $api_key =~ [[:space:]] ]]; then
+        echo "the key contains whitespace (a space, tab or line break); nothing deployed" >&2
+        exit 1
+    fi
+    # Enough to compare with .env, never more: the length and the last 4 characters.
+    echo "key read: ${#api_key} characters, ending in ...${api_key: -4}"
+fi
 
 vault="$(az keyvault list -g rg-maa-env --query "[0].name" -o tsv 2>/dev/null || true)"
 secret_exists=false
