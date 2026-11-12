@@ -206,7 +206,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - Firewall rules `AllowAllAzureServicesAndResourcesWithinAzureIps` (0.0.0.0–0.0.0.0) and `owner-access` (`ownerAccessIp`–`ownerAccessIp`).
   - Outputs: `serverFqdn`, `serverName`, `jobIdentityId`, `jobIdentityClientId`, `jobIdentityPrincipalId`.
 
-  No database resource (research R3).
+  No database resource (research R3). *Re-checked before the first deployment:* `infra/sql/bootstrap.sql` step 2 creates `market_anomaly_agent` (`CREATE DATABASE … \gexec` in the `postgres` phase, which `db-bootstrap.sh` runs before connecting to it), so `DATABASE_URL` names a database that exists once T028 step 2 has run. A `flexibleServers/databases` resource stays out on purpose: an ARM-created database would not be owned by `maa-db-admins`, so the bootstrap would skip `CREATE DATABASE` and its `GRANT … ON SCHEMA public` could fail. Until the bootstrap has run, a job execution fails with exit 1 and alerts (deployment-contract.md §6).
 - [X] T018 [US1] Implement the US1 part of `infra/modules/env.bicep` per data-model.md §3 "`rg-maa-env`" and contracts/deployment-contract.md §4:
   - `log-maa` (`PerGB2018`, `retentionInDays: 30`).
   - `cae-maa`: consumption only, `appLogsConfiguration` to `log-maa` with its shared key via `listKeys`.
@@ -262,7 +262,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - `dbAdminGroupObjectId` from `az ad group show --group maa-db-admins --query id -o tsv`, at run time.
   - Alert email from `$MAA_ALERT_EMAIL`, or `read -r` if unset.
   - Refuse to deploy (exit 1, before the what-if) when `dbAdminGroupObjectId` or the alert email is empty. `infra/main.bicepparam` sets both to `''` only because a parameter file must give a value for every required parameter, so an empty value always means the run-time lookup or the prompt failed.
-  - Vendor key from `read -rs`; empty keeps the stored secret. Refuse to deploy when the key is empty and `twelve-data-api-key` does not exist yet (first deployment, or after teardown purged the vault), because the job's role assignment is scoped to that secret (T018).
+  - Vendor key from `IFS= read -rs` (`IFS=` so leading and trailing whitespace is kept and caught, not trimmed); empty keeps the stored secret. *Added before the first deployment:* a non-empty key containing any whitespace is refused (exit 1, nothing deployed). Otherwise the script prints only the key's length and its last 4 characters (`key read: N characters, ending in ...XXXX`), before the what-if, so the owner can compare it with `.env` before confirming. It never prints more. Refuse to deploy when the key is empty and `twelve-data-api-key` does not exist yet (first deployment, or after teardown purged the vault), because the job's role assignment is scoped to that secret (T018).
   - `jobImage` from `az containerapp job show -n job-maa-detect -g rg-maa-env --query "properties.template.containers[0].image" -o tsv`, falling back to the placeholder when the job does not exist.
   - Run `az deployment sub what-if -l <location> -n maa-<timestamp> -f infra/main.bicep -p infra/main.bicepparam -p dbAdminGroupObjectId=… alertEmail=… jobImage=… twelveDataApiKey="$KEY"`.
   - Then run `az deployment sub create … --confirm-with-what-if` with the same parameters.
@@ -285,7 +285,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
 
   Record the region and the real EUR prices in `specs/002-azure-daily-run/research.md` (R2, R10).
 - [ ] T028 [US1] (owner, host) Run the first deployment from quickstart.md §2:
-  1. `infra/scripts/deploy.sh` (answer **y**), and set the three GitHub variables. The first run can fail while the new Key Vault role assignment for `id-maa-job` propagates (for example, the job cannot read its secret reference); `deploy.sh` is idempotent, so wait a few minutes and run it again.
+  1. `infra/scripts/deploy.sh` (answer **y**), and set the three GitHub variables. From this first run on, `rg-maa-data` carries the CanNotDelete lock (T041, pulled forward), so starting over by deleting that group needs `az lock delete -n lock-maa-data -g rg-maa-data` first. The first run can also fail while the new Key Vault role assignment for `id-maa-job` propagates (for example, the job cannot read its secret reference); `deploy.sh` is idempotent, so wait a few minutes and run it again.
   2. `infra/scripts/db-access.sh open`, `infra/scripts/db-bootstrap.sh` (must print `bootstrap ok`; this is check Q7 part 1, the first sign-in as `maa-db-admins`; on failure follow the work-account fallback in quickstart.md §2), `infra/scripts/db-access.sh close`.
   3. `gh workflow run ci.yml --ref main`, then set the GHCR package `market-anomaly-agent` to public.
   4. Check Q7 part 2 (quickstart.md §2): with `db-access.sh open`, a `verify-full` connection from the published image using `sslrootcert=/etc/ssl/certs/ca-certificates.crt` succeeds and reports `ssl = true`, and the same connection with `sslrootcert=/dev/null` fails with a certificate error. Then `db-access.sh close`. On failure, apply the fallback in research R8.
@@ -377,7 +377,7 @@ FR-027, FR-030 to FR-032).
 
 ### Implementation for User Story 4
 
-- [ ] T041 [US4] In `infra/modules/data.bicep`, add `Microsoft.Authorization/locks` `lock-maa-data` at resource-group scope (no `scope` property, so it applies to `rg-maa-data`) with `level: 'CanNotDelete'` and notes `Stored detection results; see deployment-contract.md §6 (decommission)`. It is deployed on every run, so it is in place after every deployment (FR-030).
+- [X] T041 [US4] In `infra/modules/data.bicep`, add `Microsoft.Authorization/locks` `lock-maa-data` at resource-group scope (no `scope` property, so it applies to `rg-maa-data`) with `level: 'CanNotDelete'` and notes `Stored detection results; see deployment-contract.md §6 (decommission)`. It is deployed on every run, so it is in place after every deployment (FR-030). *Pulled forward into US1 (before T028):* the database holds the research record from the first run on, so the lock is part of the first deployment. The teardown, decommission and restore scripts (T042–T044) stay in US4.
 - [ ] T042 [P] [US4] Create `infra/scripts/teardown.sh` (sources `_common.sh`):
   - Print what will be deleted and require typing `rg-maa-env` to confirm.
   - `az group delete -n rg-maa-env --yes`, then purge the soft-deleted vault: `az keyvault list-deleted --query "[?name=='kv-maa-<u>']"`, then `az keyvault purge -n <name> -l <location>`. Read the vault name from `az keyvault list -g rg-maa-env` before the delete.
