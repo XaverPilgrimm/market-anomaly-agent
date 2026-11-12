@@ -8,6 +8,7 @@
 using 'main.bicep'
 
 param location = 'germanywestcentral'
+// deploy.sh overrides this with GitHub's exact spelling from `gh repo view` (OIDC subject match).
 param githubRepository = 'XaverPilgrimm/market-anomaly-agent'
 param budgetAmountEur = 30
 param budgetStartDate = '2026-11-01'

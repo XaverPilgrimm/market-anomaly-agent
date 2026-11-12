@@ -96,7 +96,7 @@ script, and the CI checks every later change is validated by
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [X] T004 Create `infra/scripts/_common.sh`, sourced by every script. It does three things. (1) `set -euo pipefail`. (2) It exits 1 with `run this on the host, not inside a container (research R15)` if `/run/.containerenv` or `/.dockerenv` exists. (3) It defines `require_az_login` (runs `az account show` and exits 1 with a clear message if that fails), `repo_root` (the git top level) and `pg_client` (`podman run --rm -i -e PGPASSWORD --network host docker.io/library/postgres:17 "$@"`). Make it non-executable; it is only sourced.
+- [X] T004 Create `infra/scripts/_common.sh`, sourced by every script. It does three things. (1) `set -euo pipefail`. (2) It exits 1 with `run this on the host, not inside a container (research R15)` if `/run/.containerenv` or `/.dockerenv` exists. (3) It defines `require_az_login` (runs `az account show` and exits 1 with a clear message if that fails), `repo_root` (the git top level) and `pg_client` (`podman run --rm -i -e PGPASSWORD --network host docker.io/library/postgres:17 "$@"`). Make it non-executable; it is only sourced. *Added later:* its first line is `# shellcheck shell=bash` (it is sourced, so it has no shebang), and every script that sources it carries `# shellcheck source=infra/scripts/_common.sh` above the `source` line, so `shellcheck -x` (T007) can follow it.
 - [X] T005 Create `infra/main.bicep` with `targetScope = 'subscription'`:
   - The parameters from contracts/deployment-contract.md §2: `location`, `githubRepository`, `dbAdminGroupName` (default `'maa-db-admins'`), `dbAdminGroupObjectId`, `alertEmail`, `@secure() twelveDataApiKey` (default `''`), `jobImage`, `ownerAccessIp` (default `'192.0.2.1'`), `budgetAmountEur` (default `30`), `jobReplicaTimeoutSeconds` (default `3600`), and `budgetStartDate` (default `'2026-11-01'`).
   - The two resource groups `rg-maa-data` and `rg-maa-env` in `location`.
@@ -122,6 +122,7 @@ script, and the CI checks every later change is validated by
     6. `docker build --build-arg GIT_SHA="$GIT_SHA" -f Containerfile -t market-anomaly-agent:ci .`, with `GIT_SHA: ${{ github.sha }}` passed through `env:`. This also runs the Containerfile's CA guard (research R8).
     7. `docker run --rm market-anomaly-agent:ci --help`, failing the job unless the output has a line matching `^usage: detect .*--latest`.
     The build pulls `python:3.12-slim-bookworm` and `ghcr.io/astral-sh/uv:0.12.19` (uv binaries only, copied in by T016's build stage). Both are public, so the step still needs no registry login. A missing or mistyped base tag fails this step on the pull request, before anything reaches `main`.
+  *Extended again:* a `Shellcheck host scripts` step before the Bicep build installs shellcheck with `apt-get` only if the runner lacks it, prints its version, and runs `shellcheck -x infra/scripts/*.sh`. Deliberate exceptions are disabled inline with the reason on the line above (SC2016 in `preflight.sh`, where `$d` is a jq variable; SC2069 in `db-bootstrap.sh`, where only stderr is captured).
 
 **Checkpoint**: Bicep compiles, CI runs every check on pull requests, scripts refuse to run in the
 agent container.
@@ -197,7 +198,7 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - `ARG GIT_SHA=unknown`, `ENV APP_COMMIT=$GIT_SHA`, and `LABEL org.opencontainers.image.revision=$GIT_SHA` and `org.opencontainers.image.source=https://github.com/XaverPilgrimm/market-anomaly-agent`.
   - `USER app`, `ENTRYPOINT ["detect"]`, no `CMD`.
   - No `ENV` with any secret (FR-005).
-- [ ] T017 [US1] Implement `infra/modules/data.bicep` per data-model.md §3 "`rg-maa-data`":
+- [X] T017 [US1] Implement `infra/modules/data.bicep` per data-model.md §3 "`rg-maa-data`":
   - User-assigned identity `id-maa-job`.
   - Server `psql-maa-<u>`: `sku { name: 'Standard_B1ms', tier: 'Burstable' }`, `version: '17'`, `storage { storageSizeGB: 32, autoGrow: 'Disabled' }`, `backup { backupRetentionDays: 7, geoRedundantBackup: 'Disabled' }`, `highAvailability { mode: 'Disabled' }`, `authConfig { activeDirectoryAuth: 'Enabled', passwordAuth: 'Disabled', tenantId: tenant().tenantId }`, `network { publicNetworkAccess: 'Enabled' }`, and no `administratorLogin`.
   - Child `administrators/${dbAdminGroupObjectId}` with `principalType: 'Group'`, `principalName: dbAdminGroupName` and `tenantId: tenant().tenantId` (research R16).
@@ -206,12 +207,12 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - Outputs: `serverFqdn`, `serverName`, `jobIdentityId`, `jobIdentityClientId`, `jobIdentityPrincipalId`.
 
   No database resource (research R3).
-- [ ] T018 [US1] Implement the US1 part of `infra/modules/env.bicep` per data-model.md §3 "`rg-maa-env`" and contracts/deployment-contract.md §4:
+- [X] T018 [US1] Implement the US1 part of `infra/modules/env.bicep` per data-model.md §3 "`rg-maa-env`" and contracts/deployment-contract.md §4:
   - `log-maa` (`PerGB2018`, `retentionInDays: 30`).
   - `cae-maa`: consumption only, `appLogsConfiguration` to `log-maa` with its shared key via `listKeys`.
   - `kv-maa-<u>`: Standard, `enableRbacAuthorization: true`, `softDeleteRetentionInDays: 7`, `enablePurgeProtection` omitted or false.
   - Secret `twelve-data-api-key`, created only `if (!empty(twelveDataApiKey))`.
-  - Role assignments: Key Vault Secrets User (`4633458b-17de-408a-b874-0445c86b69e6`) for `jobIdentityPrincipalId` on the secret resource (when the secret is created in this deployment; otherwise on the vault); Key Vault Secrets Officer (`b86a8fe4-44ce-4948-aee5-eccb2c155cd7`) for `dbAdminGroupObjectId` on the vault with `principalType: 'Group'`. The job's assignment uses `principalType: 'ServicePrincipal'`.
+  - Role assignments: Key Vault Secrets User (`4633458b-17de-408a-b874-0445c86b69e6`) for `jobIdentityPrincipalId`, always scoped to the secret itself: an `existing` reference to `twelve-data-api-key`, with `dependsOn` the conditionally created secret, so the job never gets vault-wide read (*tightened during implementation*; it replaces the earlier "otherwise on the vault", and T025 therefore refuses an empty key while the secret does not exist); Key Vault Secrets Officer (`b86a8fe4-44ce-4948-aee5-eccb2c155cd7`) for `dbAdminGroupObjectId` on the vault with `principalType: 'Group'`. The job's assignment uses `principalType: 'ServicePrincipal'`.
   - Job `job-maa-detect` with the fixed job settings, user-assigned identity `jobIdentityId`, secret `price-data-api-key` with `keyVaultUrl: '${vault.properties.vaultUri}secrets/twelve-data-api-key'` and `identity: jobIdentityId`, image `jobImage`, and env:
     - `DATABASE_URL = 'postgresql://id-maa-job@${serverFqdn}:5432/market_anomaly_agent?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'`
     - `DATABASE_AUTH = 'entra'`
@@ -219,13 +220,13 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
     - `PRICE_DATA_API_KEY` from secretRef `price-data-api-key`
 
     No `registries` block. The job depends on the secret role assignment.
-- [ ] T019 [US1] Add the pipeline identity:
+- [X] T019 [US1] Add the pipeline identity:
   - In `infra/main.bicep`, a custom role definition (`Microsoft.Authorization/roleDefinitions`, name `guid(subscription().id, 'maa-job-image-updater')`, role name `Market Anomaly Agent job image updater`), with `actions: ['Microsoft.App/jobs/read', 'Microsoft.App/jobs/write']` and `assignableScopes: [subscription().id]`. Pass its ID to env.bicep.
   - In `infra/modules/env.bicep`, identity `id-maa-github`.
   - Its child `federatedIdentityCredentials` `github-main`: issuer `https://token.actions.githubusercontent.com`, `audiences: ['api://AzureADTokenExchange']`, subject `'repo:${githubRepository}:ref:refs/heads/main'`.
   - A role assignment of the custom role to `id-maa-github` with `scope: job` (FR-008, FR-009, research R7).
   - The `AZURE_CLIENT_ID` output.
-- [ ] T020 [P] [US1] Create `infra/sql/bootstrap.sql` per research R3 steps 1–5. It is idempotent and driven by psql variables `:"job_role"` and `:"admin_role"`, and runs in two connections, split by the script with `\if :{?phase_db}`:
+- [X] T020 [P] [US1] Create `infra/sql/bootstrap.sql` per research R3 steps 1–5. It is idempotent and driven by psql variables `:"job_role"` and `:"admin_role"`, and runs in two connections, split by the script with `\if :{?phase_db}`:
   - Phase `postgres`:
     - Create the principal only if `pg_roles` lacks it: `SELECT … pgaadauth_create_principal(:'job_role', false, false) \gexec`, guarded with `\if`.
     - `CREATE DATABASE market_anomaly_agent` only if it is missing (`\gexec`).
@@ -234,41 +235,43 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
     - `GRANT :"job_role" TO :"admin_role" WITH INHERIT TRUE, SET TRUE`.
   - Phase `market_anomaly_agent`: `GRANT USAGE, CREATE ON SCHEMA public TO :"job_role"`.
   - Finally, a `DO` block that raises an exception unless `has_schema_privilege(:'job_role', 'public', 'CREATE')` and `pg_has_role(current_user, :'job_role', 'USAGE')` are both true. psql runs with `-v ON_ERROR_STOP=1`.
-- [ ] T021 [P] [US1] Create `infra/scripts/db-access.sh` (sources `_common.sh`; `open|close`):
+- [X] T021 [P] [US1] Create `infra/scripts/db-access.sh` (sources `_common.sh`; `open|close`):
   - `open` gets the owner's public IP from `curl -fsS https://api.ipify.org`, checks it is a valid IPv4 address, and runs `az postgres flexible-server firewall-rule update -g rg-maa-data -n <server> -r owner-access --start-ip-address <ip> --end-ip-address <ip>`.
   - `close` sets `192.0.2.1`.
   - The rule is never deleted, because the lock blocks deletion (research R14).
   - The server name is read with `az postgres flexible-server list -g rg-maa-data --query "[0].name" -o tsv`.
-- [ ] T022 [P] [US1] Create `infra/scripts/entra-bootstrap.sh` (sources `_common.sh`; `require_az_login`) per contracts/deployment-contract.md §2a and research R16. It is idempotent:
+- [X] T022 [P] [US1] Create `infra/scripts/entra-bootstrap.sh` (sources `_common.sh`; `require_az_login`) per contracts/deployment-contract.md §2a and research R16. It is idempotent:
   - `uid=$(az ad signed-in-user show --query id -o tsv)`, read at run time and never printed.
   - Create the security group if `az ad group show --group maa-db-admins` fails: `az ad group create --display-name maa-db-admins --mail-nickname maa-db-admins`.
   - Add the signed-in user unless `az ad group member check --group maa-db-admins --member-id "$uid" --query value -o tsv` prints `true`: `az ad group member add --group maa-db-admins --member-id "$uid"`.
   - If `az ad group member list --group maa-db-admins --query "[].id" -o tsv` lists any ID other than `$uid`, exit 1 with `maa-db-admins must have exactly one member` and change nothing.
   - Print `admin group ok`. No object, tenant or subscription ID appears in output or in the file.
-- [ ] T023 [US1] Create `infra/scripts/db-bootstrap.sh` (sources `_common.sh`, depends on T020):
+- [X] T023 [US1] Create `infra/scripts/db-bootstrap.sh` (sources `_common.sh`, depends on T020):
   - Get `PGPASSWORD` with `az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv`.
   - Run `bootstrap.sql` through `pg_client psql "host=<server-fqdn> dbname=postgres user=maa-db-admins sslmode=verify-full sslrootcert=system" -v ON_ERROR_STOP=1 -v job_role=id-maa-job -v admin_role=maa-db-admins -v phase_db=postgres -f -` (file piped on stdin), then again with `dbname=market_anomaly_agent` and without `phase_db`.
   - Read the server FQDN at run time (`az postgres flexible-server list -g rg-maa-data --query "[0].fullyQualifiedDomainName" -o tsv`).
   - On an authentication failure of the first connection, print the check Q7 fallback from quickstart.md §2 (work account in the group) and exit 1.
   - Print `bootstrap ok` only if both succeed. Remind the owner to run `db-access.sh close`.
-- [ ] T024 [US1] Create `infra/scripts/preflight.sh <region>` (sources `_common.sh`) for quickstart check Q1. Print PASS or FAIL per item and exit non-zero on any FAIL:
+- [X] T024 [US1] Create `infra/scripts/preflight.sh <region>` (sources `_common.sh`) for quickstart check Q1. Print PASS or FAIL per item and exit non-zero on any FAIL:
   - `az postgres flexible-server list-skus -l <region>` must list `Standard_B1ms` in tier `Burstable`, and version `17` must be supported in that region.
   - `az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='jobs'].locations"` must contain the region's display name.
   - It prints the subscription's display name (`az account show --query name -o tsv`), never its ID or the tenant ID.
-- [ ] T025 [US1] Create `infra/scripts/deploy.sh` (depends on T022) per contracts/deployment-contract.md §3 (sources `_common.sh`; `require_az_login`):
+- [X] T025 [US1] Create `infra/scripts/deploy.sh` (depends on T022) per contracts/deployment-contract.md §3 (sources `_common.sh`; `require_az_login`):
+  - *Added later:* pass `githubRepository` from `gh repo view --json nameWithOwner -q .nameWithOwner` (run in the repository root), not from `main.bicepparam`, and exit 1 if `gh` cannot read it. The federated credential's subject must equal the OIDC token's `sub` claim exactly, including case. The GHCR image name in `ci.yml` stays lowercase, as GHCR requires. The what-if header prints the repository name.
   - First run `infra/scripts/entra-bootstrap.sh`, and stop if it fails.
   - `dbAdminGroupObjectId` from `az ad group show --group maa-db-admins --query id -o tsv`, at run time.
   - Alert email from `$MAA_ALERT_EMAIL`, or `read -r` if unset.
   - Refuse to deploy (exit 1, before the what-if) when `dbAdminGroupObjectId` or the alert email is empty. `infra/main.bicepparam` sets both to `''` only because a parameter file must give a value for every required parameter, so an empty value always means the run-time lookup or the prompt failed.
-  - Vendor key from `read -rs`; empty keeps the stored secret.
+  - Vendor key from `read -rs`; empty keeps the stored secret. Refuse to deploy when the key is empty and `twelve-data-api-key` does not exist yet (first deployment, or after teardown purged the vault), because the job's role assignment is scoped to that secret (T018).
   - `jobImage` from `az containerapp job show -n job-maa-detect -g rg-maa-env --query "properties.template.containers[0].image" -o tsv`, falling back to the placeholder when the job does not exist.
   - Run `az deployment sub what-if -l <location> -n maa-<timestamp> -f infra/main.bicep -p infra/main.bicepparam -p dbAdminGroupObjectId=… alertEmail=… jobImage=… twelveDataApiKey="$KEY"`.
   - Then run `az deployment sub create … --confirm-with-what-if` with the same parameters.
   - Print the outputs, then offer `gh variable set AZURE_CLIENT_ID|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID --body …` (y/N each).
   - Print the next steps: `db-access.sh open`, `db-bootstrap.sh`, `db-access.sh close`, `gh workflow run ci.yml --ref main`, and set the GHCR package to public.
   - Never echo the key, the email or any object, tenant or subscription ID. The `gh variable set` values are passed straight from the deployment outputs.
-- [ ] T026 [US1] Add the `publish-deploy` job to `.github/workflows/ci.yml` per contracts/deployment-contract.md §5:
-  - `needs: checks`; `if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'`; `permissions: contents: read, packages: write, id-token: write`; no `environment:` key.
+- [X] T026 [US1] Add the `publish-deploy` job to `.github/workflows/ci.yml` per contracts/deployment-contract.md §5:
+  - *Added later:* `concurrency: { group: publish-deploy, cancel-in-progress: false }`, so two quick merges deploy one after the other and no deployment is cancelled midway. GitHub keeps one run in progress and one pending; a third queued run replaces the pending one, so the newest commit is the one that ends up deployed.
+  - `needs: checks`; `if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AZURE_CLIENT_ID != '' && vars.AZURE_TENANT_ID != '' && vars.AZURE_SUBSCRIPTION_ID != ''`. *Added after implementation:* while any of the three repository variables that `deploy.sh` sets is empty (before the first deployment), the whole job is skipped, so the merge to `main` before T028 shows a skipped job rather than a failed run. Nothing is pushed in that case. After `deploy.sh` has set the variables, `gh workflow run ci.yml --ref main` (T028) runs it; `permissions: contents: read, packages: write, id-token: write`; no `environment:` key.
   - Steps (actions pinned to commit SHAs):
     1. Checkout.
     2. `docker/login-action` to `ghcr.io` with `${{ github.actor }}` and `${{ secrets.GITHUB_TOKEN }}`.
@@ -278,11 +281,11 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
 - [ ] T027 [US1] (owner, host) Run the pre-deployment checks from quickstart.md §1:
   - Q1: `infra/scripts/preflight.sh germanywestcentral`. On FAIL, try `westeurope`, then `northeurope`, then `swedencentral`, and set `location` in `infra/main.bicepparam` to the first that passes.
   - Q2: price the resources in the Azure pricing calculator in EUR. The total must be ≤ EUR 24.
-  - Q6: run `infra/scripts/deploy.sh` and answer **n** at the confirmation. `entra-bootstrap.sh` must print `admin group ok` (the group `maa-db-admins` now exists with you as its only member). The what-if must list only data-model.md §3 resources, with a `Group` Entra administrator.
+  - Q6: run `infra/scripts/deploy.sh` and answer **n** at the confirmation. (Expect that the later real run in T028 may need a second attempt while a role assignment propagates; see quickstart.md Q6.) `entra-bootstrap.sh` must print `admin group ok` (the group `maa-db-admins` now exists with you as its only member). The what-if must list only data-model.md §3 resources, with a `Group` Entra administrator.
 
   Record the region and the real EUR prices in `specs/002-azure-daily-run/research.md` (R2, R10).
 - [ ] T028 [US1] (owner, host) Run the first deployment from quickstart.md §2:
-  1. `infra/scripts/deploy.sh` (answer **y**), and set the three GitHub variables.
+  1. `infra/scripts/deploy.sh` (answer **y**), and set the three GitHub variables. The first run can fail while the new Key Vault role assignment for `id-maa-job` propagates (for example, the job cannot read its secret reference); `deploy.sh` is idempotent, so wait a few minutes and run it again.
   2. `infra/scripts/db-access.sh open`, `infra/scripts/db-bootstrap.sh` (must print `bootstrap ok`; this is check Q7 part 1, the first sign-in as `maa-db-admins`; on failure follow the work-account fallback in quickstart.md §2), `infra/scripts/db-access.sh close`.
   3. `gh workflow run ci.yml --ref main`, then set the GHCR package `market-anomaly-agent` to public.
   4. Check Q7 part 2 (quickstart.md §2): with `db-access.sh open`, a `verify-full` connection from the published image using `sslrootcert=/etc/ssl/certs/ca-certificates.crt` succeeds and reports `ssl = true`, and the same connection with `sslrootcert=/dev/null` fails with a certificate error. Then `db-access.sh close`. On failure, apply the fallback in research R8.

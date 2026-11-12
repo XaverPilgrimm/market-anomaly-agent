@@ -41,14 +41,37 @@ param jobReplicaTimeoutSeconds int = 3600
 @description('First day of the budget period; must be the first of a month.')
 param budgetStartDate string = '2026-11-01'
 
-resource dataRg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
+resource dataRg 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: 'rg-maa-data'
   location: location
 }
 
-resource envRg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
+resource envRg 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: 'rg-maa-env'
   location: location
+}
+
+// The pipeline identity may read and update the job, and nothing else: no start (which could
+// reference the job's secrets through a template override), no delete (research R7).
+resource jobImageUpdater 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(subscription().id, 'maa-job-image-updater')
+  properties: {
+    roleName: 'Market Anomaly Agent job image updater'
+    description: 'Read and update the image of the Container Apps job job-maa-detect.'
+    type: 'CustomRole'
+    permissions: [
+      {
+        actions: [
+          'Microsoft.App/jobs/read'
+          'Microsoft.App/jobs/write'
+        ]
+        notActions: []
+      }
+    ]
+    assignableScopes: [
+      subscription().id
+    ]
+  }
 }
 
 module data 'modules/data.bicep' = {
@@ -77,6 +100,7 @@ module env 'modules/env.bicep' = {
     jobIdentityId: data.outputs.jobIdentityId
     jobIdentityClientId: data.outputs.jobIdentityClientId
     jobIdentityPrincipalId: data.outputs.jobIdentityPrincipalId
+    jobImageUpdaterRoleId: jobImageUpdater.id
   }
 }
 

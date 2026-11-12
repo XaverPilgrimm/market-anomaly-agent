@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the host-side operation scripts in infra/scripts/.
 #
 # Sourced, never executed:  source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
@@ -36,4 +37,20 @@ repo_root() {
 # the caller's environment and never appears on the command line.
 pg_client() {
     podman run --rm -i -e PGPASSWORD --network host docker.io/library/postgres:17 "$@"
+}
+
+# Name and host name of the PostgreSQL server in rg-maa-data, read at run time.
+server_name() {
+    az postgres flexible-server list -g rg-maa-data --query "[0].name" -o tsv
+}
+
+server_fqdn() {
+    az postgres flexible-server list -g rg-maa-data --query "[0].fullyQualifiedDomainName" -o tsv
+}
+
+# The owner's own Entra access token for Azure Database for PostgreSQL, exported as PGPASSWORD for
+# pg_client. Never printed.
+export_pg_token() {
+    PGPASSWORD="$(az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv)"
+    export PGPASSWORD
 }
