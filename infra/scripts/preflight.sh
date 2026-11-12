@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Quickstart check Q1: does <region> offer everything this feature needs, for this subscription?
 #
-#   infra/scripts/preflight.sh germanywestcentral
+#   infra/scripts/preflight.sh francecentral
 #
-# Fallback order if it fails (research R2): westeurope, northeurope, swedencentral. Set the
-# region that passes as `location` in infra/main.bicepparam.
+# This is a first filter only. The capabilities listing can pass while provisioning is blocked
+# for this subscription (it passed germanywestcentral, which then refused a server: research R2).
+# The decisive check is the probe in quickstart.md Q1: create a B1ms server in a throwaway
+# resource group, then delete the group. Fallback if either fails: italynorth. Set the region
+# that passes both as `location` in infra/main.bicepparam.
 
 # shellcheck source=infra/scripts/_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
@@ -56,8 +59,11 @@ check "Container Apps jobs available in $display" "$has_jobs"
 
 if ((failed)); then
     echo
-    echo "Region $region does not pass. Try the next fallback (research R2)."
+    echo "Region $region does not pass. Try the fallback italynorth (research R2)."
     exit 1
 fi
 echo
-echo "Region $region passes check Q1."
+echo "Region $region passes the listing (check Q1, step a)."
+echo "The listing can pass while provisioning is still blocked for this subscription (location"
+echo "restricted, not accepting new customers, SkuNotAvailable). Decide Q1 with the probe in"
+echo "quickstart.md Q1: create a B1ms server in a throwaway resource group, then delete the group."

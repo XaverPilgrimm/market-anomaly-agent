@@ -53,16 +53,37 @@ per-attempt reading would allow up to 3 hours, which is why check Q3 is a gate a
 - *Setting 1800 straight away.* Rejected. Under the per-execution reading, which the documentation
   suggests, it would cut off the third attempt and break US3 scenario 3.
 
-## R2. Region: Germany West Central
+## R2. Region: France Central
 
-**Decision**: target **Germany West Central** (`germanywestcentral`) for every resource of the
-feature. Quickstart check Q1 must pass on the owner's subscription before the first deployment.
-If it fails, use the first region on this fallback list that passes the same check, for all
-resources together (FR-015 requires one region): **West Europe → North Europe → Sweden Central**.
+**Decision** (2026-11-12, after probing): target **France Central** (`francecentral`) for every
+resource of the feature, for all resources together (FR-015 requires one region). The fallback is
+**Italy North** (`italynorth`), the only other region where the probe succeeded. The original
+target, Germany West Central, and the original fallback list (West Europe → North Europe → Sweden
+Central) are all ruled out for this subscription; see the probe results below.
+
+**Probe results** (2026-11-12): the owner created a Burstable `Standard_B1ms` PostgreSQL 17
+Flexible Server in each candidate region, in a throwaway resource group:
+
+| Region | Result |
+|---|---|
+| `germanywestcentral` | Refused: "The location is restricted from performing this operation" |
+| `westeurope` | Refused: the region is "not accepting new customers" |
+| `northeurope` | Refused: `SkuNotAvailable` for `Standard_B1ms` |
+| `swedencentral` | Refused: `SkuNotAvailable` for `Standard_B1ms` |
+| `polandcentral` | Refused: `SkuNotAvailable` for `Standard_B1ms` |
+| `francecentral` | **Created** (then deleted) |
+| `italynorth` | **Created** (then deleted) |
+
+**The listing is not enough.** `preflight.sh` had passed `germanywestcentral`: the capabilities
+listing (`az postgres flexible-server list-skus`) showed `Standard_B1ms`, version `17` and no
+`restricted` flag, yet provisioning was blocked. The listing does not reveal subscription-level
+location restrictions, capacity closures or SKU shortages. So quickstart check Q1 now treats the
+listing as a first filter only, and the decisive check is a probe: create a B1ms server in a
+throwaway resource group, then delete the group.
 
 **Findings**:
 
-- Container Apps jobs: `Microsoft.App/jobs` is generally available, and Germany West Central is a
+- Container Apps jobs: `Microsoft.App/jobs` is generally available, and France Central is a
   Container Apps region. Check Q1 confirms this with
   `az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='jobs'].locations"`.
 - PostgreSQL 17 is generally available on Flexible Server
@@ -73,34 +94,41 @@ resources together (FR-015 requires one region): **West Europe → North Europe 
   Central", and a later report that provisioning is limited to EA customers
   ([Q&A 2182828](https://learn.microsoft.com/en-us/answers/questions/2182828/burstable-skus-seem-not-to-be-available-in-new-sub),
   [Q&A 2260300](https://learn.microsoft.com/en-us/answers/questions/2260300/how-do-i-request-region-enablement-for-postgresql)).
-  These threads may be out of date, but availability can only be confirmed for this subscription,
-  with `az postgres flexible-server list-skus --location germanywestcentral`. That command must
-  show `Standard_B1ms` in the `Burstable` tier and `17` among the supported versions.
-- A support request for region enablement is possible, but it is not on the critical path: the
-  fallback regions are also EU and keep the design unchanged. Only the `location` parameter and the
-  cost table change.
+  The probe of 2026-11-12 confirmed this risk for this subscription (see the table above).
+- A support request for region enablement is possible, but it is not on the critical path: France
+  Central and Italy North are also EU and keep the design unchanged. Only the `location` parameter
+  and the cost table change.
 
-**Alternatives considered**: General Purpose `D2ds_v5` in Germany West Central. Rejected: it costs
-well over USD 100 per month and breaks the cap on its own.
+**Alternatives considered**:
 
-**API version for PostgreSQL** (recorded 2026-11-12, after the first real deployment): the server
-and its child resources (`administrators`, `configurations`, `firewallRules`) use
-**`2025-08-01`**, the GA version before the newest one, `2026-10-01`.
+- *General Purpose `D2ds_v5` in Germany West Central.* Rejected: it costs well over USD 100 per
+  month and breaks the cap on its own.
+- *Italy North as the target.* Kept as the fallback. Both regions passed the probe; France Central
+  is the more established region.
+- *A support request to unlock Germany West Central.* Not pursued: it is slow, its outcome is
+  uncertain, and France Central works today.
 
-- **What failed:** with `2026-10-01`, the `maa-data` module failed with `ParameterOutOfRange`:
-  "The value of the 'Version' should be in: []".
-- **Why it is the API version, not PostgreSQL 17:** the list of allowed values was *empty*, so the
-  resource provider offered no version at all through that API version for this subscription and
-  region. `preflight.sh` (check Q1) had confirmed version `17` for this subscription in
-  `germanywestcentral` through the capabilities API. So the newest API version was not yet served
-  correctly there.
-- **What it means for later features:** the tasks' general rule ("newest non-preview version")
-  does not apply to `Microsoft.DBforPostgreSQL`. A new PostgreSQL API version counts as confirmed
-  only after a real deployment against this subscription and region has succeeded. The template
+**API version for PostgreSQL** (recorded 2026-11-12, after the first real deployment; cause
+revised the same day after the region probes): the server and its child resources
+(`administrators`, `configurations`, `firewallRules`) use **`2025-08-01`**, the GA version before
+the newest one, `2026-10-01`.
+
+- **What failed:** the first real deployment, in `germanywestcentral` with `2026-10-01`, failed in
+  the `maa-data` module with `ParameterOutOfRange`: "The value of the 'Version' should be in: []".
+- **Most likely cause: the region restriction, not the API version.** The list of allowed values
+  was *empty*, so the resource provider offered no PostgreSQL version at all to this subscription
+  in that region. The probes of 2026-11-12 (above) showed that `germanywestcentral` refuses any
+  server for this subscription ("The location is restricted from performing this operation"),
+  although its capabilities listing showed version `17`. A restricted location offering nothing
+  explains the empty list; nothing shows that `2026-10-01` itself was at fault.
+- **Why `2025-08-01` is kept anyway:** it is GA and it is proven in `francecentral`. Moving to
+  `2026-10-01` would bring nothing this feature needs. The properties it uses (`authConfig`,
+  `network.publicNetworkAccess`, `highAvailability.mode`, `principalType: 'Group'`) are unchanged
+  in `2025-08-01`.
+- **What it means for later features:** a new PostgreSQL API version counts as confirmed only
+  after a real deployment against this subscription and region has succeeded. The template
   reference listing it is not enough, and neither is a what-if: the what-if for this deployment
-  passed, and only the real deployment hit the error. The properties this feature uses
-  (`authConfig`, `network.publicNetworkAccess`, `highAvailability.mode`, `principalType: 'Group'`)
-  are unchanged in `2025-08-01`.
+  passed, and only the real deployment hit the error.
 
 ## R3. Database authentication and roles (who runs the migrations)
 
@@ -394,9 +422,10 @@ the budget are both in EUR. The README states that budgets only notify and never
 The exchange rate is used only to convert the USD-quoted price estimates below. It does not affect
 the budget.
 
-**Estimate**, Germany West Central, pay-as-you-go list prices. These are estimates: the PostgreSQL
-figures come from third-party price trackers because Microsoft's calculator could not be read
-automatically. Check Q2 in quickstart.md re-prices them in the [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/)
+**Estimate**, pay-as-you-go list prices, taken for Germany West Central before the region moved
+to France Central (R2). These are estimates: the PostgreSQL figures come from third-party price
+trackers because Microsoft's calculator could not be read automatically. Check Q2 in quickstart.md
+re-prices them for France Central in the [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/)
 in EUR before the first deployment.
 
 | Resource | Basis | USD / month | EUR / month (×0.89 EUR per USD) |

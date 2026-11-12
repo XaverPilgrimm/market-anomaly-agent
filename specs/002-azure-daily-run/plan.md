@@ -9,7 +9,7 @@
 ## Summary
 
 Run feature 001's `detect` unattended once per US trading day, as an Azure Container Apps
-**scheduled job** (`0 11 * * 2-6` UTC) in **Germany West Central**. Results are stored in an
+**scheduled job** (`0 11 * * 2-6` UTC) in **France Central**. Results are stored in an
 **Entra-only PostgreSQL 17 Flexible Server (B1ms)**. The application gains a `--latest` mode,
 which resolves the last completed New York trading day and exits 0 without a vendor call when
 that day is already stored, and a `--migrate` flag, so the job runs `detect --latest --migrate` as
@@ -124,8 +124,9 @@ Q7 admin sign-in through the group with a personal account.
 **Post-design re-check (after Phase 1)**: still passing. The design introduced no new service, and
 GHCR removes one Azure resource. The Entra group is a directory object, not a service. Three items
 depend on the owner's subscription and are gated rather than assumed: B1ms and PostgreSQL 17
-availability in Germany West Central (Q1, with an EU fallback), the timeout scope (Q3), and whether
-a personal account can sign in through the admin group (Q7, with a work-account fallback).
+availability in the target region (Q1, decided by a probe; France Central since 2026-11-12, with
+Italy North as the fallback), the timeout scope (Q3), and whether a personal account can sign in
+through the admin group (Q7, with a work-account fallback).
 
 ## Project Structure
 
@@ -188,8 +189,11 @@ disposable. The CI workflow and `Containerfile` sit at the conventional root loc
    set once on GitHub. Reverting to ACR Basic is a small, documented change.
 2. **Budget EUR 30**, the constitution's Azure cap, stated in EUR (constitution v1.2.0,
    research R10).
-3. **Region fallback order** if Germany West Central refuses B1ms or PostgreSQL 17 for this
-   subscription: West Europe → North Europe → Sweden Central (research R2).
+3. **Region: France Central, fallback Italy North** (research R2, decided 2026-11-12). Probes on
+   this subscription refused a B1ms PostgreSQL 17 server in Germany West Central (location
+   restricted), West Europe (not accepting new customers), North Europe, Sweden Central and Poland
+   Central (`SkuNotAvailable`); France Central and Italy North accepted it. The SKU listing had
+   passed Germany West Central, so check Q1 is now decided by a probe, not by the listing.
 4. **Entra administrator: the security group `maa-db-admins`**, with the owner's personal
    Microsoft account as its only member, created by `entra-bootstrap.sh`. No owner, tenant,
    subscription or object identifiers in any file (research R16).

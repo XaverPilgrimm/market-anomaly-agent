@@ -25,9 +25,24 @@
 
 | # | Check | How | Pass condition |
 |---|---|---|---|
-| Q1 | Region offers everything | `infra/scripts/preflight.sh germanywestcentral` (wraps `az postgres flexible-server list-skus -l …` and `az provider show -n Microsoft.App …`) | `Standard_B1ms` (Burstable) and version `17` listed; `jobs` lists the region. Otherwise rerun with the next fallback (`westeurope`, `northeurope`, `swedencentral`) and set `location` (research R2). |
+| Q1 | Region offers everything | Two steps. (a) `infra/scripts/preflight.sh francecentral` (wraps `az postgres flexible-server list-skus -l …` and `az provider show -n Microsoft.App …`): a first filter only, because the listing can pass while provisioning is blocked (it passed `germanywestcentral`, which then refused the probe server; research R2). (b) **The decisive check, a probe**: create a B1ms server in a throwaway resource group, then delete the group (commands below). | (a) `Standard_B1ms` (Burstable) and version `17` listed; `jobs` lists the region. (b) The probe server is created. If either fails, repeat both with the fallback `italynorth` and set `location` in `infra/main.bicepparam` (research R2). |
 | Q2 | Cost in EUR | Azure pricing calculator, chosen region, EUR: B1ms 730 h, 32 GiB storage, two log alert rules | Total ≤ EUR 24 (the 80% notification threshold of the EUR 30 budget, so a normal month never triggers it); update research R10 with the real figures |
 | Q6 | What-if is clean | `infra/scripts/deploy.sh` first runs `entra-bootstrap.sh` (prints `admin group ok`), then stops at the what-if prompt; answer **n** the first time and read it | The group `maa-db-admins` exists with you as its only member (`az ad group member list --group maa-db-admins --query "[].displayName"`). Only the resources in data-model.md §3 are created; nothing outside `rg-maa-data`, `rg-maa-env` and the subscription-scope budget and role is touched. The Entra administrator in the what-if is a `Group`. When you later answer **y** (T028), the first real deployment can fail while the new Key Vault role assignment for `id-maa-job` propagates, for example with an error that the job cannot read its secret reference. `deploy.sh` is idempotent: wait a few minutes and run it again. |
+
+**Q1 probe** (host; a few cents at most for the minutes the server exists). The
+`rg-maa-probe` group is separate from the feature's groups and has no lock, so deleting it removes
+everything the probe made:
+
+```bash
+region=francecentral
+az group create -n rg-maa-probe -l "$region" --output none
+az postgres flexible-server create -g rg-maa-probe -n psql-maa-probe-$(date +%s) -l "$region" --tier Burstable --sku-name Standard_B1ms --storage-size 32 --version 17 --public-access None --yes
+az group delete -n rg-maa-probe --yes
+```
+
+Pass: the `create` finishes without an error and prints the new server. A refusal ("The location
+is restricted from performing this operation", "not accepting new customers", `SkuNotAvailable`)
+fails Q1 for that region. Always run the `az group delete`, whether the create succeeded or not.
 
 ## 2. Deploy and bootstrap
 

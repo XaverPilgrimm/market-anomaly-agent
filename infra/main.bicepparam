@@ -7,7 +7,7 @@
 
 using 'main.bicep'
 
-param location = 'germanywestcentral'
+param location = 'francecentral'
 // deploy.sh overrides this with GitHub's exact spelling from `gh repo view` (OIDC subject match).
 param githubRepository = 'XaverPilgrimm/market-anomaly-agent'
 param budgetAmountEur = 30

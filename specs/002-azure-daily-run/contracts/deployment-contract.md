@@ -41,7 +41,7 @@ Containerfile
 
 | Parameter | Type | Source | In repo? |
 |---|---|---|---|
-| `location` | string | `main.bicepparam`, default `germanywestcentral` | yes |
+| `location` | string | `main.bicepparam`, default `francecentral` (research R2) | yes |
 | `githubRepository` | string | `main.bicepparam`, `XaverPilgrimm/market-anomaly-agent` | yes |
 | `dbAdminGroupName` | string | default `maa-db-admins` | yes (a fixed public name) |
 | `dbAdminGroupObjectId` | string | `deploy.sh`, at run time: `az ad group show --group maa-db-admins --query id -o tsv` | **no** |
