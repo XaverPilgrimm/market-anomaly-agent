@@ -26,7 +26,7 @@ resource jobIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-3
   location: location
 }
 
-resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2026-10-01' = {
+resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   name: 'psql-maa-${suffix}'
   location: location
   sku: {
@@ -59,7 +59,7 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2026-10-01' = {
 }
 
 // The Entra administrator is the security group, not a user (research R16).
-resource admin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2026-10-01' = {
+resource admin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2025-08-01' = {
   parent: server
   name: dbAdminGroupObjectId
   properties: {
@@ -70,7 +70,7 @@ resource admin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2026-10
 }
 
 // Server parameters are updated one after the other: concurrent updates conflict.
-resource requireTls 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2026-10-01' = {
+resource requireTls 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
   parent: server
   name: 'require_secure_transport'
   properties: {
@@ -82,7 +82,7 @@ resource requireTls 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@20
   ]
 }
 
-resource minTls 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2026-10-01' = {
+resource minTls 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
   parent: server
   name: 'ssl_min_protocol_version'
   properties: {
@@ -96,7 +96,7 @@ resource minTls 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2026-1
 
 // Microsoft's convention for "allow public access from Azure services" (research R14). The job's
 // outbound addresses change, so they cannot be listed; Entra-only login is the real gate.
-resource allowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2026-10-01' = {
+resource allowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2025-08-01' = {
   parent: server
   name: 'AllowAllAzureServicesAndResourcesWithinAzureIps'
   properties: {
@@ -110,7 +110,7 @@ resource allowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@202
 
 // Never deleted (the lock forbids it): db-access.sh moves it between the owner's IP and
 // 192.0.2.1, and every deployment resets it to closed (research R14).
-resource ownerAccess 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2026-10-01' = {
+resource ownerAccess 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2025-08-01' = {
   parent: server
   name: 'owner-access'
   properties: {

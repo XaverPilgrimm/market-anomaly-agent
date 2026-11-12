@@ -83,6 +83,25 @@ resources together (FR-015 requires one region): **West Europe → North Europe 
 **Alternatives considered**: General Purpose `D2ds_v5` in Germany West Central. Rejected: it costs
 well over USD 100 per month and breaks the cap on its own.
 
+**API version for PostgreSQL** (recorded 2026-11-12, after the first real deployment): the server
+and its child resources (`administrators`, `configurations`, `firewallRules`) use
+**`2025-08-01`**, the GA version before the newest one, `2026-10-01`.
+
+- **What failed:** with `2026-10-01`, the `maa-data` module failed with `ParameterOutOfRange`:
+  "The value of the 'Version' should be in: []".
+- **Why it is the API version, not PostgreSQL 17:** the list of allowed values was *empty*, so the
+  resource provider offered no version at all through that API version for this subscription and
+  region. `preflight.sh` (check Q1) had confirmed version `17` for this subscription in
+  `germanywestcentral` through the capabilities API. So the newest API version was not yet served
+  correctly there.
+- **What it means for later features:** the tasks' general rule ("newest non-preview version")
+  does not apply to `Microsoft.DBforPostgreSQL`. A new PostgreSQL API version counts as confirmed
+  only after a real deployment against this subscription and region has succeeded. The template
+  reference listing it is not enough, and neither is a what-if: the what-if for this deployment
+  passed, and only the real deployment hit the error. The properties this feature uses
+  (`authConfig`, `network.publicNetworkAccess`, `highAvailability.mode`, `principalType: 'Group'`)
+  are unchanged in `2025-08-01`.
+
 ## R3. Database authentication and roles (who runs the migrations)
 
 **Decision**: the server allows Microsoft Entra authentication only

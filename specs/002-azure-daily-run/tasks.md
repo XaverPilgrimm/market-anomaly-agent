@@ -71,7 +71,9 @@ These are fixed here so no task has to decide them during implementation:
   `<YYYY-MM-DD> already stored; nothing fetched`.
 - **Bicep API versions**: `Microsoft.App/jobs@2026-07-01` and the matching
   `Microsoft.App/managedEnvironments` version. For the other resource types, use the newest
-  non-preview version listed in the Azure template reference.
+  non-preview version listed in the Azure template reference, **except**
+  `Microsoft.DBforPostgreSQL/flexibleServers` and its children, which stay on `2025-08-01`
+  (research R2, *API version for PostgreSQL*).
 - **Fixed job settings** (contracts/deployment-contract.md §4): cron `0 11 * * 2-6`,
   `replicaTimeout` `3600` (set as Bicep parameter `jobReplicaTimeoutSeconds`, default 3600, so
   check Q3 can change it), `replicaRetryLimit` `2`, `parallelism` `1`, `replicaCompletionCount`
@@ -205,6 +207,8 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - Child `configurations`: `require_secure_transport` = `on` and `ssl_min_protocol_version` = `TLSv1.2`, deployed one after the other (`dependsOn`), because concurrent configuration updates conflict.
   - Firewall rules `AllowAllAzureServicesAndResourcesWithinAzureIps` (0.0.0.0–0.0.0.0) and `owner-access` (`ownerAccessIp`–`ownerAccessIp`).
   - Outputs: `serverFqdn`, `serverName`, `jobIdentityId`, `jobIdentityClientId`, `jobIdentityPrincipalId`.
+
+  - *Fixed after the first real deployment:* the server and its `administrators`, `configurations` and `firewallRules` use API version `2025-08-01`, not `2026-10-01`. With `2026-10-01` the `maa-data` module failed with `ParameterOutOfRange`: "The value of the 'Version' should be in: []". The empty list points at the API version, not at PostgreSQL 17, which `preflight.sh` (Q1) had confirmed for this subscription in `germanywestcentral` (research R2).
 
   No database resource (research R3). *Re-checked before the first deployment:* `infra/sql/bootstrap.sql` step 2 creates `market_anomaly_agent` (`CREATE DATABASE … \gexec` in the `postgres` phase, which `db-bootstrap.sh` runs before connecting to it), so `DATABASE_URL` names a database that exists once T028 step 2 has run. A `flexibleServers/databases` resource stays out on purpose: an ARM-created database would not be owned by `maa-db-admins`, so the bootstrap would skip `CREATE DATABASE` and its `GRANT … ON SCHEMA public` could fail. Until the bootstrap has run, a job execution fails with exit 1 and alerts (deployment-contract.md §6).
 - [X] T018 [US1] Implement the US1 part of `infra/modules/env.bicep` per data-model.md §3 "`rg-maa-env`" and contracts/deployment-contract.md §4:
