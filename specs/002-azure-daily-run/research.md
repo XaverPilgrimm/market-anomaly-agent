@@ -15,6 +15,12 @@ be settled against the owner's own subscription are turned into explicit checks 
 `replicaCompletionCount = 1`. Before go-live, quickstart check Q3 confirms the behaviour
 empirically. If the timer turns out to apply per attempt, the value is lowered to `1800`.
 
+**Confirmed by check Q3 (2026-11-13): the timer is per execution, so `3600` stays.** A temporary
+copy of the job with `replicaTimeout 120`, `replicaRetryLimit 2` and a container running
+`sh -c 'sleep 50; exit 1'` ran only 2 replicas, started 11 s and 79 s after the execution start.
+The second was cut off when the execution reached 120 s, and no third replica started. Under a
+per-attempt timer all 3 would have run to their `exit 1`. This matches the reading below.
+
 **What the documentation says** ([Jobs in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/jobs)):
 
 - `replicaTimeout`: "The maximum time in seconds to wait for a replica to complete."
@@ -354,6 +360,11 @@ to also need `Microsoft.App/managedEnvironments/join/action` (on the environment
 `Microsoft.App/jobs/listSecrets/action` (which returns only the Key Vault reference, not the
 value), add exactly that action and record it.
 
+**Confirmed by check Q5 (2026-11-13):** `publish-deploy` succeeded with the custom role only
+(`Microsoft.App/jobs/read` and `Microsoft.App/jobs/write`, at job scope).
+`Microsoft.App/managedEnvironments/join/action` was not needed, and neither was
+`Microsoft.App/jobs/listSecrets/action`; the role stays as it is.
+
 **Bicep ↔ pipeline drift**: the pipeline changes the job's image outside Bicep. `deploy.sh`
 therefore reads the image currently on the job (`az containerapp job show …`) and passes it as the
 `jobImage` parameter, so a redeploy never rolls the job back. On the very first deployment there is
@@ -407,6 +418,12 @@ bundle is refreshed with every image build, so a root rotation needs no reposito
   roots by subject name (tasks.md T016). A base image without them can never be published.
 - Quickstart check Q7 makes a real `verify-full` connection from the published image, plus a
   negative connection that must fail without the bundle, so the test is known to check something.
+
+**Confirmed by check Q7 part 2 (2026-11-13):** from the published image, a `verify-full`
+connection with `sslrootcert=/etc/ssl/certs/ca-certificates.crt` printed `(True, 'TLSv1.3')`, and
+the same connection with `sslrootcert=/dev/null` failed with "could not read root certificate
+file". So the image's libpq finds and uses the bundle, the negative run proves the check is real,
+and the fallback below is not needed.
 
 **Fallback**, if a future base image dropped either root: copy the two PEM files from Microsoft's
 documentation into the image as `/app/certs/azure-postgres-roots.pem` and point `sslrootcert` at
@@ -491,6 +508,19 @@ in EUR before the first deployment.
 | **Subtotal with GHCR (chosen)** | | **21.21** | **18.88** (63% of EUR 30) |
 | Azure Container Registry Basic (alternative) | ~USD 0.167/day | 5.00 | 4.45 |
 | **Subtotal with ACR** | | **26.21** | **23.33** (78% of EUR 30) |
+
+**Check Q2 result** (2026-11-13, Azure pricing calculator, France Central, EUR):
+
+| Item | EUR / month |
+|---|---|
+| PostgreSQL Flexible Server, Burstable B1ms, 730 h, Premium SSD 32 GiB | about 16.30 |
+| Container Apps job and environment, Log Analytics, Key Vault | within the free grants, or a few cents at this usage |
+| Two log alert rules | **not priced yet**: they arrive with US3 (tasks.md T034–T036) and must be added to this estimate then; the estimate above puts them at about EUR 1.79 |
+| **Total so far** | **about 16.30** (54% of EUR 30), below the EUR 24 limit of check Q2 |
+
+This replaces the third-party PostgreSQL figures above (EUR 17.09 for compute and storage together)
+for France Central. With the alert rules at the estimated EUR 1.79 the total would be about
+EUR 18.09 (60% of the cap), still below EUR 24.
 
 **Watch items**: Microsoft Defender for Cloud plans must stay off (they bill per resource). A
 General Purpose SKU, high availability or geo-redundant backup would each break the cap and are
