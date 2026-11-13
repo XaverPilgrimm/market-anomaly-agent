@@ -282,6 +282,28 @@ def test_missing_api_key_exits_1_naming_the_variable(
     assert "PRICE_DATA_API_KEY" in capsys.readouterr().err
 
 
+def test_the_injected_clock_is_passed_to_run_detection(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-014: detection reads its fetch-start and computation instants from the same injected
+    clock as --latest, not from a single instant taken before the fetch."""
+    clocks: list[object] = []
+
+    def recording_detect(
+        evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, clock: object
+    ) -> DetectionResult:
+        clocks.append(clock)
+        return fakes.result
+
+    def clock() -> datetime:
+        return datetime(2026, 10, 28, 11, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(cli, "run_detection", recording_detect)
+
+    assert cli.main(["--date", "2026-10-27"], now=clock) == 0
+    assert clocks == [clock]
+
+
 def test_progress_logs_go_to_stderr_and_stdout_is_only_the_summary(
     fakes: Fakes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -8,7 +8,7 @@ import logging
 import math
 import re
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -533,3 +533,43 @@ def test_an_unavailable_ticker_keeps_the_fetch_count_consecutive(
         f"fetched {t} ({k} of 11)" + (": no data" if t == "GONE" else "")
         for k, t in enumerate([BENCHMARK_TICKER, "GONE", *sorted(fillers(9))], 1)
     ]
+
+
+class SteppingClock:
+    """A fake injected clock: each read returns the current instant and is recorded."""
+
+    def __init__(self, start: datetime) -> None:
+        self.current = start
+        self.reads: list[datetime] = []
+
+    def __call__(self) -> datetime:
+        self.reads.append(self.current)
+        return self.current
+
+
+class ClockAdvancingSource(FakeSource):
+    """Each fetch takes one minute on `clock`, like a real rate-limited fetch."""
+
+    def __init__(self, specs: dict[str, StockSpec], clock: SteppingClock) -> None:
+        super().__init__(specs)
+        self.clock = clock
+
+    def get_daily_bars(self, ticker: str, start: date, end: date) -> list[DailyBar]:
+        self.clock.current += timedelta(minutes=1)
+        return super().get_daily_bars(ticker, start, end)
+
+
+def test_fetch_start_and_computation_instants_come_from_the_injected_clock() -> None:
+    """FR-014: computed_at is when the computation is performed, i.e. after every bar has been
+    fetched, not when the fetch starts. The fetch start is kept separately for the bars'
+    fetched_at. Exactly two reads of the clock: one before the first fetch, one after the last."""
+    clock = SteppingClock(NOW)
+    source = ClockAdvancingSource(US1_SPECS, clock)
+    fetches = len(US1_SPECS) + 1  # the benchmark too
+
+    result = run_detection(D, list(US1_SPECS), source, clock)
+
+    assert len(source.calls) == fetches
+    assert result.fetched_at == NOW
+    assert result.computed_at == NOW + timedelta(minutes=fetches)
+    assert clock.reads == [result.fetched_at, result.computed_at]

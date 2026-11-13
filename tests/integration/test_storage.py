@@ -403,3 +403,25 @@ def test_load_universe_once_rejects_any_change_and_leaves_the_table_unchanged(
         load_universe_once(migrated_conn, changed)
 
     assert universe_rows(migrated_conn) == as_rows(universe())
+
+
+@pytest.mark.integration
+def test_bars_store_the_fetch_start_and_the_run_the_computation_instant(
+    migrated_conn: Conn,
+) -> None:
+    """FR-014: detection_runs.computed_at is the computation instant; every bar's fetched_at is
+    the instant the fetch started, which is earlier."""
+    fetch_start = datetime(2026, 10, 28, 11, 0, 30, tzinfo=UTC)
+    computed = datetime(2026, 10, 28, 11, 14, 5, tzinfo=UTC)
+    result = dataclasses.replace(basic_result(), fetched_at=fetch_start, computed_at=computed)
+
+    save_run(migrated_conn, result)
+
+    run_row = migrated_conn.execute(
+        b"SELECT computed_at FROM detection_runs WHERE evaluated_date = %s", (D,)
+    ).fetchone()
+    assert run_row is not None and run_row[0] == computed
+    fetched = migrated_conn.execute(
+        b"SELECT DISTINCT fetched_at FROM daily_price_bars WHERE evaluated_date = %s", (D,)
+    ).fetchall()
+    assert fetched == [(fetch_start,)]
