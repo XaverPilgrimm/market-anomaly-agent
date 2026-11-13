@@ -7,7 +7,7 @@ The fakes replace module-level names in `market_anomaly_agent.cli`: `run_detecti
 
 import dataclasses
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import TracebackType
@@ -60,7 +60,8 @@ def build_result() -> DetectionResult:
     return DetectionResult(
         evaluated_date=D,
         rule_version="1",
-        computed_at=datetime(2026, 10, 28, 11, 0, tzinfo=UTC),
+        fetched_at=datetime(2026, 10, 28, 11, 0, tzinfo=UTC),
+        computed_at=datetime(2026, 10, 28, 11, 14, tzinfo=UTC),
         benchmark_ticker="QQQ",
         benchmark_return=Decimal("0.005"),
         bars=bars,
@@ -122,7 +123,7 @@ class Fakes:
         evaluated_date: date,
         tickers: Sequence[str],
         source: PriceDataSource,
-        now: datetime,
+        clock: Callable[[], datetime],
     ) -> DetectionResult:
         self.detect_calls.append((evaluated_date, list(tickers)))
         if self.detect_error is not None:
@@ -310,13 +311,16 @@ def test_progress_logs_go_to_stderr_and_stdout_is_only_the_summary(
     """T053 (1): INFO is on by default; progress never reaches stdout."""
 
     def detect_with_progress(
-        evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, now: datetime
+        evaluated_date: date,
+        tickers: Sequence[str],
+        source: PriceDataSource,
+        clock: Callable[[], datetime],
     ) -> DetectionResult:
         logging.getLogger("market_anomaly_agent.detection").info("fetched AAA (2 of 3)")
         logging.getLogger("market_anomaly_agent.data.twelvedata_source").warning(
             "BBB: HTTP 503, retrying in 2 s"
         )
-        return fakes.run_detection(evaluated_date, tickers, source, now)
+        return fakes.run_detection(evaluated_date, tickers, source, clock)
 
     monkeypatch.setattr(cli, "run_detection", detect_with_progress)
 

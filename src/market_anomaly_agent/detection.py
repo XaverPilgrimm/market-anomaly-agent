@@ -5,7 +5,7 @@ every stored number is converted with Decimal(repr(value)) ("Shared decisions" i
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -79,7 +79,8 @@ class SkippedRecord:
 class DetectionResult:
     evaluated_date: date
     rule_version: str
-    computed_at: datetime
+    fetched_at: datetime  # when the fetch started; every bar of the run carries it
+    computed_at: datetime  # when the computation was performed, after every fetch (FR-014)
     benchmark_ticker: str
     benchmark_return: Decimal
     bars: Mapping[str, Sequence[DailyBar]]  # every bar fetched, per ticker incl. the benchmark
@@ -121,9 +122,15 @@ def _skip(ticker: str, reason_code: str, reason_detail: str) -> SkippedRecord:
 
 
 def run_detection(
-    evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, now: datetime
+    evaluated_date: date,
+    tickers: Sequence[str],
+    source: PriceDataSource,
+    clock: Callable[[], datetime],
 ) -> DetectionResult:
     """Evaluate every ticker in `tickers` for `evaluated_date` against BENCHMARK_TICKER.
+
+    `clock` is read exactly twice: when the fetch starts (`fetched_at`) and, after every bar has
+    been fetched, right before the computation (`computed_at`, FR-014).
 
     A ticker without usable data is skipped with `missing_data` or `insufficient_history` (FR-012,
     FR-017). Raises BenchmarkUnavailableError (FR-022) or TooMuchMissingDataError (FR-023) before
@@ -141,6 +148,7 @@ def run_detection(
         BENCHMARK_TICKER,
     )
 
+    fetched_at = clock()
     try:
         benchmark_bars = tuple(source.get_daily_bars(BENCHMARK_TICKER, start, evaluated_date))
     except PriceDataUnavailable as exc:
@@ -159,8 +167,7 @@ def run_detection(
     benchmark_on_d = benchmark_returns[evaluated_date]
 
     bars: dict[str, tuple[DailyBar, ...]] = {BENCHMARK_TICKER: benchmark_bars}
-    records: dict[str, EvaluatedRecord] = {}
-    scores: dict[str, float] = {}
+    fetched: dict[str, tuple[DailyBar, ...]] = {}  # in sorted ticker order
     skipped: list[SkippedRecord] = []
     for position, ticker in enumerate(sorted(tickers), 2):
         try:
@@ -172,6 +179,13 @@ def run_detection(
         log.info("fetched %s (%d of %d)", ticker, position, fetch_count)
         if ticker_bars:  # no key for no bars, matching a snapshot read back from storage
             bars[ticker] = ticker_bars
+        fetched[ticker] = ticker_bars
+
+    # Every bar is fetched; the computation starts now (FR-014).
+    computed_at = clock()
+    records: dict[str, EvaluatedRecord] = {}
+    scores: dict[str, float] = {}
+    for ticker, ticker_bars in fetched.items():
         gap = _missing_day(ticker_bars, return_days)
         if gap is not None:
             skipped.append(_skip(ticker, "missing_data", f"no bar on {gap.isoformat()}"))
@@ -255,7 +269,8 @@ def run_detection(
     return DetectionResult(
         evaluated_date=evaluated_date,
         rule_version=RULE_VERSION,
-        computed_at=now,
+        fetched_at=fetched_at,
+        computed_at=computed_at,
         benchmark_ticker=BENCHMARK_TICKER,
         benchmark_return=_to_decimal(benchmark_on_d),
         bars=bars,

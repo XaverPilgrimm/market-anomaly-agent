@@ -179,7 +179,7 @@ def main(
             with connect() as conn:
                 applied = apply_migrations(conn)
             log.info("applied migration(s): %s", ", ".join(applied) or "none")
-        return _run(evaluated_date, source_factory or TwelveDataPriceDataSource)
+        return _run(evaluated_date, source_factory or TwelveDataPriceDataSource, now or _utc_now)
     except RunAbortedError as exc:
         log.error("run for %s aborted, nothing stored: %s", evaluated_date, _scrub(str(exc)))
         return EXIT_UNUSABLE_INPUT
@@ -193,13 +193,17 @@ def main(
         return EXIT_ERROR
 
 
-def _run(evaluated_date: date, source_factory: Callable[[str], PriceDataSource]) -> int:
+def _run(
+    evaluated_date: date,
+    source_factory: Callable[[str], PriceDataSource],
+    clock: Callable[[], datetime],
+) -> int:
     api_key = os.environ.get(API_KEY_VAR)
     if not api_key:
         log.error("%s is not set", API_KEY_VAR)
         return EXIT_ERROR
     tickers = load_universe_tickers()
-    result = run_detection(evaluated_date, tickers, source_factory(api_key), datetime.now(UTC))
+    result = run_detection(evaluated_date, tickers, source_factory(api_key), clock)
 
     with connect() as conn:
         stored = load_run(conn, evaluated_date)

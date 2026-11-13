@@ -154,7 +154,8 @@ def make_result(
     return DetectionResult(
         evaluated_date=D,
         rule_version="1",
-        computed_at=datetime(2026, 10, 28, 11, 0, tzinfo=UTC),
+        fetched_at=datetime(2026, 10, 28, 11, 0, tzinfo=UTC),
+        computed_at=datetime(2026, 10, 28, 11, 14, tzinfo=UTC),
         benchmark_ticker="QQQ",
         benchmark_return=Decimal("0.004998958550302020"),
         bars=bars,

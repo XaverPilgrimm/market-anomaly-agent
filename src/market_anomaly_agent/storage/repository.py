@@ -93,7 +93,7 @@ def save_run(conn: Conn, result: DetectionResult) -> None:
                 result.benchmark_return,
             ),
         )
-        # The bars were fetched within this run; computed_at stands in for the fetch time.
+        # Every bar carries the instant the run's fetch started (result.fetched_at).
         cur.executemany(
             """
             INSERT INTO daily_price_bars
@@ -109,7 +109,7 @@ def save_run(conn: Conn, result: DetectionResult) -> None:
                     b.close,
                     b.volume,
                     BAR_SOURCE,
-                    result.computed_at,
+                    result.fetched_at,
                 )
                 for ticker, bars in sorted(result.bars.items())
                 for b in bars
