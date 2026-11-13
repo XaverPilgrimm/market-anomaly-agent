@@ -18,9 +18,5 @@ param budgetStartDate = '2026-11-01'
 param dbAdminGroupObjectId = ''
 param alertEmail = ''
 param jobImage = 'mcr.microsoft.com/k8se/quickstart-jobs:latest'
-// Not literal '': both parameters are @minLength(1), and Bicep rejects a literal empty string for
-// them when compiling this file, before deploy.sh's -p overrides apply. readEnvironmentVariable
-// keeps the file compiling; deploy.sh always passes the real IDs, and an empty value that reached
-// Azure would fail the deployment's parameter validation instead of creating a broken subject.
-param githubOwnerId = readEnvironmentVariable('MAA_GITHUB_OWNER_ID', '')
-param githubRepositoryId = readEnvironmentVariable('MAA_GITHUB_REPOSITORY_ID', '')
+param githubOwnerId = ''
+param githubRepositoryId = ''

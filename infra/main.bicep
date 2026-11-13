@@ -14,11 +14,9 @@ param location string
 param githubRepository string
 
 @description('Numeric GitHub ID of the repository owner, for the immutable OIDC subject. Read by deploy.sh with gh api.')
-@minLength(1)
 param githubOwnerId string
 
 @description('Numeric GitHub ID of the repository, for the immutable OIDC subject. Read by deploy.sh with gh api.')
-@minLength(1)
 param githubRepositoryId string
 
 @description('Display name of the Entra security group that is the PostgreSQL Entra administrator.')

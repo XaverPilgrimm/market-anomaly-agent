@@ -10,11 +10,9 @@ param location string
 param githubRepository string
 
 @description('Numeric GitHub ID of the repository owner.')
-@minLength(1)
 param githubOwnerId string
 
 @description('Numeric GitHub ID of the repository.')
-@minLength(1)
 param githubRepositoryId string
 
 @description('Object ID of the Entra administrator group (Key Vault Secrets Officer).')
