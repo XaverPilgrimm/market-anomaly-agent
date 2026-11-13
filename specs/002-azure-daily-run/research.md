@@ -285,7 +285,7 @@ for the owner to confirm.
   write`):
   1. Build the image with `--build-arg GIT_SHA=${{ github.sha }}` and push `:<sha>` to GHCR.
   2. `azure/login` with `client-id`, `tenant-id` and `subscription-id` taken from **repository
-     variables** (not secrets; these are identifiers).
+     secrets** (*changed 2026-11-13*, see below; they were repository variables at first).
   3. `az containerapp job update -n job-maa-detect -g rg-maa-env --image ghcr.io/…:<sha>`.
 - **No `environment:` key** on the deploy job. With one, the OIDC subject becomes
   `repo:…:environment:<name>` and no longer matches the branch-restricted credential.
@@ -297,10 +297,52 @@ on `id-maa-github`):
 
 - issuer `https://token.actions.githubusercontent.com`
 - audience `api://AzureADTokenExchange`
-- subject `repo:XaverPilgrimm/market-anomaly-agent:ref:refs/heads/main`
+- subject `repo:XaverPilgrimm@<owner_id>/market-anomaly-agent@<repo_id>:ref:refs/heads/main`
+  (*changed 2026-11-13*; it was `repo:XaverPilgrimm/market-anomaly-agent:ref:refs/heads/main`)
 
 A token request from any other ref is refused (FR-008, SC-007). A user-assigned identity is used
 instead of an app registration, so everything stays in Bicep without Microsoft Graph.
+
+**Immutable subject claims** (recorded 2026-11-13, after the first `publish-deploy` run):
+
+- **Error:** `azure/login` failed with `AADSTS700213`: "No matching federated identity record
+  found for presented assertion subject
+  'repo:XaverPilgrimm@<owner_id>/market-anomaly-agent@<repo_id>:ref:refs/heads/main'".
+- **Cause:** since 2026-07-15, GitHub issues immutable subject claims by default for newly created
+  repositories: the owner and repository names are each followed by `@` and their numeric GitHub
+  ID. This repository is one of them. The federated credential still expected the name-based
+  subject, so the two no longer matched.
+- **Fix:** the credential's subject is built in `env.bicep` as
+  `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main`. The names come from
+  `githubRepository` (GitHub's exact case, from `gh repo view`). The IDs are not hard-coded:
+  `deploy.sh` reads them at deploy time with `gh api repos/<owner>/<repo>` (`owner.id` and `id`),
+  refuses anything that is not numeric, and passes them as the Bicep parameters `githubOwnerId` and
+  `githubRepositoryId`. The IDs never change, even if the repository or owner is renamed; the names
+  in the subject would then need a redeploy.
+
+**Sign-in values as secrets, gated by a variable** (recorded 2026-11-13):
+
+- **Problem:** the same `azure/login` run printed `client-id`, `tenant-id` and `subscription-id` in
+  its inputs. The repository is public, so its Actions logs are public too, and values from the
+  `vars` context are not masked.
+- **Fix:** the three values are repository **secrets** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `AZURE_SUBSCRIPTION_ID`), which GitHub masks in logs. `deploy.sh` sets them with `gh secret set`,
+  passing each value from the deployment outputs on stdin: never printed, never on a command line,
+  never interactive. It then offers to delete the old repository variables of the same names.
+- **Gate:** the `secrets` context is not available in a job-level `if`, so `publish-deploy` can no
+  longer skip itself by checking the values. It is gated instead on a non-sensitive repository
+  variable, `AZURE_DEPLOY_ENABLED == 'true'`, which `deploy.sh` offers to set after the secrets.
+  Until it is set the job is skipped, as before, rather than failing. If the variable is set but a
+  secret is missing, the job's first step fails with a message naming the missing secret, before
+  anything is pushed. Chosen over a step-level check alone, which would turn every merge before
+  the first deployment into a failed run.
+
+**Redeploy keeps the job's image** (checked 2026-11-13): `deploy.sh` already passed the job's
+current image as `jobImage`, so a rerun after `publish-deploy` has switched the job does not reset
+it to the placeholder. One gap was fixed: the lookup used `az containerapp job show … 2>/dev/null
+|| true`, so any failure (a missing CLI extension, a transient error) silently fell back to the
+placeholder and would have rolled the job back. Now the placeholder is used only when
+`rg-maa-env` or the job provably does not exist; any failed lookup stops the deployment.
 
 **Pipeline identity's permission**: a custom role **"Market Anomaly Agent job image updater"**
 (defined in Bicep at subscription scope, assigned at the scope of `job-maa-detect` only) with the
@@ -586,7 +628,9 @@ them at run time from `az`:
 
 The documentation uses placeholders such as `<tenant-id>`, `<subscription-id>` and
 `<server-fqdn>`. The pipeline gets the tenant ID, the subscription ID and its own client ID from
-GitHub repository **variables**, set by `deploy.sh` through `gh variable set`; these are never
-written to a file. Fixed public names (`maa-db-admins`, `id-maa-job`, the repository slug) and
+GitHub repository **secrets**, set by `deploy.sh` through `gh secret set` (*changed 2026-11-13*
+from variables, because the public Actions logs showed them; R7); these are never written to a
+file. The numeric GitHub owner and repository IDs in the OIDC subject are read with `gh api` at
+deploy time and not written to a file either. Fixed public names (`maa-db-admins`, `id-maa-job`, the repository slug) and
 Microsoft's documented built-in role definition IDs are not personal identifiers and may appear in
 files.

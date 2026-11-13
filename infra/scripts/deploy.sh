@@ -43,6 +43,19 @@ if ! repository="$(cd "$ROOT" && gh repo view --json nameWithOwner -q .nameWithO
     exit 1
 fi
 
+# GitHub issues immutable OIDC subjects for repositories created since 2026-07-15:
+# repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main (research R7). The numeric IDs are
+# read here and passed to Bicep, never hard-coded in a file.
+if ! ids="$(gh api "repos/$repository" --jq '[(.owner.id | tostring), (.id | tostring)] | @tsv')"; then
+    echo "could not read the repository's owner and repository IDs with 'gh api repos/$repository'" >&2
+    exit 1
+fi
+IFS=$'\t' read -r owner_id repo_id <<<"$ids"
+if ! [[ $owner_id =~ ^[0-9]+$ && $repo_id =~ ^[0-9]+$ ]]; then
+    echo "gh api returned a non-numeric owner or repository ID; nothing deployed" >&2
+    exit 1
+fi
+
 alert_email="${MAA_ALERT_EMAIL:-}"
 if [[ -z $alert_email ]]; then
     read -r -p "Alert email address: " alert_email
@@ -86,8 +99,24 @@ if [[ -z $api_key && $secret_exists != true ]]; then
 fi
 
 # Keep the image the pipeline last deployed, so a redeploy never rolls the job back (research R7).
-job_image="$(az containerapp job show -n job-maa-detect -g rg-maa-env \
-    --query "properties.template.containers[0].image" -o tsv 2>/dev/null || true)"
+# The placeholder is used only when the job provably does not exist (first deployment, or after
+# teardown). Any failed lookup stops the script instead of silently falling back to it. Generic
+# `az resource` calls are used, so the containerapp CLI extension is not needed here.
+job_image=""
+if [[ "$(az group exists -n rg-maa-env)" == true ]]; then
+    if ! job_id="$(az resource list -g rg-maa-env --resource-type Microsoft.App/jobs \
+        --query "[?name=='job-maa-detect'].id | [0]" -o tsv)"; then
+        echo "could not check whether job-maa-detect exists; nothing deployed" >&2
+        exit 1
+    fi
+    if [[ -n $job_id ]]; then
+        if ! job_image="$(az resource show --ids "$job_id" \
+            --query "properties.template.containers[0].image" -o tsv)" || [[ -z $job_image ]]; then
+            echo "job-maa-detect exists but its current image could not be read; nothing deployed" >&2
+            exit 1
+        fi
+    fi
+fi
 job_image="${job_image:-$PLACEHOLDER_IMAGE}"
 
 name="maa-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -95,7 +124,7 @@ args=(
     -l "$location" -n "$name" -f "$TEMPLATE"
     -p "$PARAMS"
     -p dbAdminGroupObjectId="$group_id" alertEmail="$alert_email" jobImage="$job_image"
-    githubRepository="$repository"
+    githubRepository="$repository" githubOwnerId="$owner_id" githubRepositoryId="$repo_id"
     twelveDataApiKey="$api_key"
 )
 
@@ -123,23 +152,42 @@ output() {
 echo
 echo "deployed: server $(output serverFqdn), job $(output jobName)"
 
-# 4. GitHub repository variables for the pipeline's OIDC sign-in. Values go straight from the
-#    deployment outputs to gh; they are never printed.
-#    gh prompts "Paste your variable" when --body is empty, so an empty value is refused here and
-#    stdin is closed, which keeps the call non-interactive in every case.
+# 4. GitHub repository secrets for the pipeline's OIDC sign-in (research R7). This repository is
+#    public and so are its Actions logs; azure/login prints its inputs, and only secrets are masked
+#    there. Each value goes from the deployment outputs to gh on stdin: never printed, never on a
+#    command line, never interactive (gh reads the value from stdin when stdin is not a terminal).
 for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
-    read -r -p "Set GitHub repository variable $var from this deployment? [y/N] " answer
+    read -r -p "Set GitHub repository secret $var from this deployment? [y/N] " answer
     if [[ $answer == [yY] ]]; then
         value="$(output "$var")"
         if [[ -z $value ]]; then
-            echo "deployment output $var is empty; $var not set (set it by hand with gh variable set)" >&2
+            echo "deployment output $var is empty; $var not set" >&2
             continue
         fi
-        gh variable set "$var" --body "$value" </dev/null
-        echo "set $var"
+        printf '%s' "$value" | gh secret set "$var" --repo "$repository"
+        echo "set secret $var"
     fi
 done
 unset value
+
+# The secrets context is not available in a job-level `if`, so publish-deploy is gated on this
+# non-sensitive variable instead.
+read -r -p "Enable publish-deploy (repository variable AZURE_DEPLOY_ENABLED=true)? [y/N] " answer
+if [[ $answer == [yY] ]]; then
+    gh variable set AZURE_DEPLOY_ENABLED --body true --repo "$repository" </dev/null
+    echo "set variable AZURE_DEPLOY_ENABLED=true"
+fi
+
+# The three values used to be repository variables (before 2026-11-13); offer to remove them.
+for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+    if gh variable get "$var" --repo "$repository" >/dev/null 2>&1; then
+        read -r -p "Delete the old repository variable $var (now a secret)? [y/N] " answer
+        if [[ $answer == [yY] ]]; then
+            gh variable delete "$var" --repo "$repository"
+            echo "deleted variable $var"
+        fi
+    fi
+done
 
 cat <<EOF
 

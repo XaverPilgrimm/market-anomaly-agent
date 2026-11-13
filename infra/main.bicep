@@ -13,6 +13,14 @@ param location string
 @description('GitHub repository allowed to sign in through OIDC, as owner/name.')
 param githubRepository string
 
+@description('Numeric GitHub ID of the repository owner, for the immutable OIDC subject. Read by deploy.sh with gh api.')
+@minLength(1)
+param githubOwnerId string
+
+@description('Numeric GitHub ID of the repository, for the immutable OIDC subject. Read by deploy.sh with gh api.')
+@minLength(1)
+param githubRepositoryId string
+
 @description('Display name of the Entra security group that is the PostgreSQL Entra administrator.')
 param dbAdminGroupName string = 'maa-db-admins'
 
@@ -91,6 +99,8 @@ module env 'modules/env.bicep' = {
   params: {
     location: location
     githubRepository: githubRepository
+    githubOwnerId: githubOwnerId
+    githubRepositoryId: githubRepositoryId
     dbAdminGroupObjectId: dbAdminGroupObjectId
     alertEmail: alertEmail
     twelveDataApiKey: twelveDataApiKey
@@ -104,7 +114,7 @@ module env 'modules/env.bicep' = {
   }
 }
 
-// Printed by deploy.sh and stored as GitHub repository variables, never written to a file.
+// Passed by deploy.sh straight to GitHub repository secrets (never printed or written to a file).
 output AZURE_CLIENT_ID string = env.outputs.githubIdentityClientId
 output AZURE_TENANT_ID string = tenant().tenantId
 output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId

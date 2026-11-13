@@ -412,7 +412,10 @@ the documented cost estimate of the deployed resources is below EUR 30 per month
 - **Deployment inputs**: the values supplied by the owner at deployment and never committed: the
   vendor key and the notification address. Identifiers of the owner's account, tenant and
   subscription are read at run time from `az`. Those the pipeline needs (tenant, subscription and
-  the pipeline identity's client ID) are kept as GitHub repository variables, never in a file.
+  the pipeline identity's client ID) are kept as GitHub repository secrets, never in a file
+  (*changed 2026-11-13* from repository variables: the repository's Actions logs are public, and
+  only secrets are masked in them). A non-sensitive repository variable, `AZURE_DEPLOY_ENABLED`,
+  only switches the deployment job on.
 
 ## Success Criteria *(mandatory)*
 
@@ -472,8 +475,10 @@ the documented cost estimate of the deployed resources is below EUR 30 per month
   the subscription's tenant and add itself to it. If Azure Database for PostgreSQL does not accept
   a personal account's token through group membership, a cloud-only work account in the same
   tenant can be added to the group instead, without changing the server.
-- Non-secret identifiers (tenant, subscription, client and resource IDs) are not credentials. They
-  may be kept as GitHub repository variables, but not in any file in the public repository.
+- Non-secret identifiers (tenant, subscription, client and resource IDs) are not credentials, but
+  this repository and its Actions logs are public. The ones the pipeline needs are kept as GitHub
+  repository secrets, so they are masked in logs (*changed 2026-11-13* from variables), and none
+  is in any file in the public repository.
 - Out of scope: the agent, X, the website, Azure OpenAI, automatic catch-up of missed days, more
   than one environment (no staging), and detecting a scheduler that never starts an execution at
   all.
