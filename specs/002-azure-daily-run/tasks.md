@@ -253,10 +253,11 @@ US1-5: a pull request runs checks only; a merge publishes `:<sha>` and the job s
   - Print `admin group ok`. No object, tenant or subscription ID appears in output or in the file.
 - [X] T023 [US1] Create `infra/scripts/db-bootstrap.sh` (sources `_common.sh`, depends on T020):
   - Get `PGPASSWORD` with `az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv`.
-  - Run `bootstrap.sql` through `pg_client psql "host=<server-fqdn> dbname=postgres user=maa-db-admins sslmode=verify-full sslrootcert=system" -v ON_ERROR_STOP=1 -v job_role=id-maa-job -v admin_role=maa-db-admins -v phase_db=postgres -f -` (file piped on stdin), then again with `dbname=market_anomaly_agent` and without `phase_db`.
+  - Run `bootstrap.sql` through `pg_client psql "host=<server-fqdn> dbname=postgres user=maa-db-admins sslmode=verify-full sslrootcert=/etc/ssl/certs/ca-certificates.crt" -v ON_ERROR_STOP=1 -v job_role=id-maa-job -v admin_role=maa-db-admins -v phase_db=postgres -f -` (file piped on stdin), then again with `dbname=market_anomaly_agent` and without `phase_db`.
   - Read the server FQDN at run time (`az postgres flexible-server list -g rg-maa-data --query "[0].fullyQualifiedDomainName" -o tsv`).
   - On an authentication failure of the first connection, print the check Q7 fallback from quickstart.md §2 (work account in the group) and exit 1.
   - Print `bootstrap ok` only if both succeed. Remind the owner to run `db-access.sh close`.
+  - *Fixed after the first deployment (2026-11-12):* `db-bootstrap.sh` failed with "SSL error: certificate verify failed". Cause: `pg_client` in `_common.sh` runs `psql` in `docker.io/library/postgres:17`, and `sslrootcert=system` finds no trusted roots in that image: the owner checked, and the image's `/etc/ssl/certs` holds only `ssl-cert-snakeoil.pem` and its hash link (`ce275665.0`), no CA bundle. The server itself was fine: on the host, `openssl s_client -starttls postgres` verified it (`Verify return code: 0`). Observed chain: the server certificate, then `Microsoft TLS G2 RSA CA OCSP 10`, then `Microsoft TLS RSA Root G2`, then `DigiCert Global Root G2`. Fix: `pg_client` first checks that `/etc/ssl/certs/ca-certificates.crt` exists (and is non-empty) on the host, exiting 1 with a message if not, then mounts it read-only into the container at the same path (`-v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro`, no SELinux relabel option). Every connection string in `infra/scripts` now uses `sslrootcert=/etc/ssl/certs/ca-certificates.crt` (via `PG_CA_BUNDLE` in `_common.sh`), the same path the job's `DATABASE_URL` uses, instead of `sslrootcert=system`. The host-side docs were changed to match: research R8, the owner query in deployment-contract.md §6, and T044.
 - [X] T024 [US1] Create `infra/scripts/preflight.sh <region>` (sources `_common.sh`) for quickstart check Q1. Print PASS or FAIL per item and exit non-zero on any FAIL:
   - `az postgres flexible-server list-skus -l <region>` must list `Standard_B1ms` in tier `Burstable`, and version `17` must be supported in that region.
   - `az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='jobs'].locations"` must contain the region's display name.
@@ -403,7 +404,7 @@ FR-027, FR-030 to FR-032).
   - Require an existing, non-empty file.
   - `db-access.sh open`.
   - Refuse if `SELECT to_regclass('public.detection_runs')` is non-null and the table has rows.
-  - `pg_restore --no-owner --role=id-maa-job --exit-on-error -d "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=system"`.
+  - `pg_restore --no-owner --role=id-maa-job --exit-on-error -d "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=/etc/ssl/certs/ca-certificates.crt"` through `pg_client` (T023 fix).
   - Print `SELECT count(*) FROM detection_runs`, then `db-access.sh close` (FR-032).
 - [ ] T045 [US4] (owner, host) Validate quickstart.md §4 rows US4-2, US4-3/4/SC-005 and US4-5/FR-030:
   - A rerun of `deploy.sh` shows a what-if with no changes.

@@ -371,9 +371,14 @@ documentation into the image as `/app/certs/azure-postgres-roots.pem` and point 
 that file. Roots only, never intermediates, as Microsoft advises.
 
 **Owner-side clients** (`psql`, `pg_dump` and `pg_restore` in the `postgres:17` container,
-deployment-contract.md §6) keep `sslrootcert=system`. That image's libpq is Debian's build, whose
-OpenSSL default store is `/usr/lib/ssl`, which points at `/etc/ssl/certs`. Their first use is
-`db-bootstrap.sh` (check Q7), which fails loudly if the store is missing.
+deployment-contract.md §6) also use `sslrootcert=/etc/ssl/certs/ca-certificates.crt`, the same
+path as the job (*revised 2026-11-12*). The earlier plan, `sslrootcert=system`, failed in
+`db-bootstrap.sh` with "certificate verify failed": the `postgres:17` image has no trusted roots in
+`/etc/ssl/certs`. `pg_client` in `_common.sh` therefore checks that the host's
+`/etc/ssl/certs/ca-certificates.crt` exists and mounts it read-only into the container at the same
+path. On the host, `openssl s_client -starttls postgres` verified the server (return code 0) with
+the chain: server certificate → `Microsoft TLS G2 RSA CA OCSP 10` → `Microsoft TLS RSA Root G2` →
+`DigiCert Global Root G2`, one of the two roots the image's CA guard checks for (tasks.md T023).
 
 ## R9. Failure alerting
 
