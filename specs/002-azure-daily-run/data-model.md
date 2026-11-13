@@ -88,7 +88,7 @@ Names are fixed by convention; `<u>` is `uniqueString(subscription().id)` trunca
 | Key Vault | `kv-maa-<u>` | Standard, RBAC, soft delete 7 days, purge protection off |
 | Key Vault secret | `twelve-data-api-key` | Created only when the deploy input is non-empty |
 | Container Apps job | `job-maa-detect` | Schedule trigger `0 11 * * 2-6`, `replicaTimeout` 3600 (research R1), `replicaRetryLimit` 2, parallelism 1, completions 1, 0.5 vCPU / 1 GiB, identity `id-maa-job`, args `--latest --migrate` |
-| User-assigned identity | `id-maa-github` | Federated credential `github-main`, subject `repo:XaverPilgrimm/market-anomaly-agent:ref:refs/heads/main` |
+| User-assigned identity | `id-maa-github` | Federated credential `github-main`, subject `repo:XaverPilgrimm@<owner_id>/market-anomaly-agent@<repo_id>:ref:refs/heads/main`, the IDs from `gh api` at deploy time (*changed 2026-11-13*: GitHub's immutable subject claims; research R7) |
 | Action group | `ag-maa-owner` | Email receiver = deploy input |
 | Scheduled query rule | `alert-maa-execution-failed` | Every 5 minutes (research R9) |
 | Scheduled query rule | `alert-maa-no-completed-run` | Every hour; the query only matches between 12:45 and 13:45 UTC, Tuesday to Saturday (research R9) |

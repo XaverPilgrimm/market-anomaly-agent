@@ -42,19 +42,34 @@ Containerfile
 | Parameter | Type | Source | In repo? |
 |---|---|---|---|
 | `location` | string | `main.bicepparam`, default `francecentral` (research R2) | yes |
-| `githubRepository` | string | `main.bicepparam`, `XaverPilgrimm/market-anomaly-agent` | yes |
+| `githubRepository` | string | `main.bicepparam`, `XaverPilgrimm/market-anomaly-agent`; `deploy.sh` overrides it with GitHub's exact spelling from `gh repo view` | yes |
+| `githubOwnerId` | string | `deploy.sh`, at run time: `gh api repos/<owner>/<repo>` → `owner.id`, must be numeric (*added 2026-11-13*) | no |
+| `githubRepositoryId` | string | `deploy.sh`, at run time: `gh api repos/<owner>/<repo>` → `id`, must be numeric (*added 2026-11-13*) | no |
 | `dbAdminGroupName` | string | default `maa-db-admins` | yes (a fixed public name) |
 | `dbAdminGroupObjectId` | string | `deploy.sh`, at run time: `az ad group show --group maa-db-admins --query id -o tsv` | **no** |
 | `alertEmail` | string | `deploy.sh` prompt, or `$MAA_ALERT_EMAIL` | **no** (FR-022) |
 | `twelveDataApiKey` | `@secure()` string | `deploy.sh` `read -rs` prompt; empty keeps the stored secret | **no** (FR-018) |
-| `jobImage` | string | `deploy.sh`: current image on the job, else the placeholder `mcr.microsoft.com/k8se/quickstart-jobs:latest` | no |
+| `jobImage` | string | `deploy.sh`: current image on the job, else the placeholder `mcr.microsoft.com/k8se/quickstart-jobs:latest`, which is used only when the job does not exist; a failed lookup stops the deployment (*tightened 2026-11-13*) | no |
 | `ownerAccessIp` | string | always `192.0.2.1` (closed) on deploy | default |
 | `budgetAmountEur` | int | default `30` (constitution Principle V) | yes |
 
 Outputs printed by `deploy.sh`: `AZURE_CLIENT_ID` (client ID of `id-maa-github`), `AZURE_TENANT_ID`,
-`AZURE_SUBSCRIPTION_ID`, the server FQDN, the job name. `deploy.sh` offers to store the first three
-with `gh variable set`. These are repository **variables**, not secrets: they are identifiers, kept
-in GitHub's settings and never written to a file.
+`AZURE_SUBSCRIPTION_ID`, the server FQDN, the job name. `deploy.sh` offers (y/N each) to store the
+first three as repository **secrets** with `gh secret set`, the value on stdin, never printed or
+interactive. It then offers to set the repository variable `AZURE_DEPLOY_ENABLED=true`, which
+enables `publish-deploy`, and to delete old repository variables of the three names.
+
+*Changed 2026-11-13:* the three values were repository variables at first. The first
+`publish-deploy` run showed them in its public log (`azure/login` prints its inputs, and variables
+are not masked), so they became secrets. Because the `secrets` context cannot be used in a
+job-level `if`, the non-sensitive `AZURE_DEPLOY_ENABLED` gate replaces the old check for non-empty
+variables (research R7).
+
+The OIDC subject of the federated credential `github-main` is
+`repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main`. *Changed 2026-11-13:* the
+name-based subject failed with `AADSTS700213` ("No matching federated identity record found"),
+because GitHub issues immutable subjects, with numeric IDs, by default for repositories created
+since 2026-07-15 (research R7).
 
 The owner's own object ID is not a deployment parameter. Only `entra-bootstrap.sh` reads it, to
 check and add the group membership.
@@ -113,8 +128,8 @@ Manual start (FR-013): `az containerapp job start -n job-maa-detect -g rg-maa-en
 | Trigger | `checks` | `publish-deploy` | Azure sign-in |
 |---|---|---|---|
 | `pull_request` → `main` | runs | **skipped** | **never** |
-| `push` → `main` | runs | runs if `checks` passed | OIDC, subject `ref:refs/heads/main` |
-| `workflow_dispatch` on `main` | runs | runs if `checks` passed | OIDC, same subject |
+| `push` → `main` | runs | runs if `checks` passed and `vars.AZURE_DEPLOY_ENABLED == 'true'` (else skipped) | OIDC, immutable subject `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main` |
+| `workflow_dispatch` on `main` | runs | same as `push` | OIDC, same subject |
 | any other ref | — | — | a token request is refused by the federated credential |
 
 `checks`: `uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy`, `pytest`,
@@ -122,10 +137,12 @@ Manual start (FR-013): `az containerapp job start -n job-maa-detect -g rg-maa-en
 
 `publish-deploy`:
 
-1. Build with `GIT_SHA=${{ github.sha }}`.
-2. Push `ghcr.io/xaverpilgrimm/market-anomaly-agent:${{ github.sha }}`.
-3. `azure/login` (OIDC).
-4. `az containerapp job update -n job-maa-detect -g rg-maa-env --image <that tag>`.
+1. Fail with a clear message if any of the secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+   `AZURE_SUBSCRIPTION_ID` is empty (*added 2026-11-13*).
+2. Build with `GIT_SHA=${{ github.sha }}`.
+3. Push `ghcr.io/xaverpilgrimm/market-anomaly-agent:${{ github.sha }}`.
+4. `azure/login` (OIDC), with the three values from repository secrets, masked in the log.
+5. `az containerapp job update -n job-maa-detect -g rg-maa-env --image <that tag>`.
 
 If any step fails, the job keeps its previous image (FR-009).
 
@@ -137,7 +154,7 @@ and `id-token: write`. There is no `environment:` key (research R7).
 | Procedure | Command | Guarantees |
 |---|---|---|
 | Owner database access | `db-access.sh open`, work, `db-access.sh close` | The rule is updated, never deleted (it is locked, research R14). `close` sets `192.0.2.1`. |
-| Owner query | `psql "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=system options='-c default_transaction_read_only=on'"`, with `PGPASSWORD` set to the owner's own token from `az account get-access-token --resource-type oss-rdbms` | Read-only session; Entra token login as the admin group (research R16) |
+| Owner query | `psql "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=/etc/ssl/certs/ca-certificates.crt options='-c default_transaction_read_only=on'"`, run through `pg_client` (which mounts the host CA bundle at that path), with `PGPASSWORD` set to the owner's own token from `az account get-access-token --resource-type oss-rdbms` | Read-only session; Entra token login as the admin group (research R16) |
 | Rotate vendor key | `az keyvault secret set --vault-name kv-maa-<u> -n twelve-data-api-key --value "$KEY"` (after `read -rs KEY`) | The job reads the latest version on its next execution |
 | Teardown | `teardown.sh` | Deletes `rg-maa-env` and purges `kv-maa-<u>`. `rg-maa-data`, the budget and the Entra group `maa-db-admins` are kept. A redeploy can run straight away (FR-027). |
 | Decommission | `decommission.sh <dump path outside repo>` | Refuses a path inside the repository. Runs `teardown.sh` first, so no job is left referencing a deleted identity. Then runs `pg_dump -Fc`, checks the file is non-empty and that `pg_restore --list` succeeds, deletes `lock-maa-data`, and runs `az group delete -n rg-maa-data` (FR-031). It keeps the Entra group `maa-db-admins`, which costs nothing and is reused by a later deployment; when the project ends for good, the owner removes it with `az ad group delete --group maa-db-admins`. |

@@ -48,14 +48,33 @@ fails Q1 for that region. Always run the `az group delete`, whether the create s
 
 ```bash
 infra/scripts/deploy.sh            # entra-bootstrap → what-if → confirm "y" → create; prompts for key and email
-gh variable set AZURE_CLIENT_ID --body <client-id>              # deploy.sh offers to do these three
-gh variable set AZURE_TENANT_ID --body <tenant-id>
-gh variable set AZURE_SUBSCRIPTION_ID --body <subscription-id>
+# deploy.sh then offers, y/N each, to set the repository secrets AZURE_CLIENT_ID, AZURE_TENANT_ID
+# and AZURE_SUBSCRIPTION_ID (values from the deployment outputs, on stdin, never printed), to set
+# the repository variable AZURE_DEPLOY_ENABLED=true, and to delete old variables of those names.
 infra/scripts/db-access.sh open
 infra/scripts/db-bootstrap.sh      # signs in as maa-db-admins with your token (check Q7); role, database, grants
 infra/scripts/db-access.sh close
-gh workflow run ci.yml --ref main  # first real image → job
+gh workflow run ci.yml --ref main  # first real image → job; only once main has this ci.yml (see below)
 ```
+
+*Changed 2026-11-13.* The first `publish-deploy` run failed at `azure/login` with `AADSTS700213`
+("No matching federated identity record found for presented assertion subject
+'repo:XaverPilgrimm@<owner_id>/market-anomaly-agent@<repo_id>:ref:refs/heads/main'"). GitHub issues
+immutable subjects, with numeric owner and repository IDs, by default for repositories created
+since 2026-07-15, and the credential expected the name-based one. `deploy.sh` now reads both IDs
+with `gh api` and the credential uses the immutable subject. The same run printed the three sign-in
+values in its public log, so they are now repository secrets, and `publish-deploy` runs only once
+`AZURE_DEPLOY_ENABLED` is `true` (research R7).
+
+To recover, in this order:
+
+1. Rerun `deploy.sh` from branch `002-azure-daily-run` and answer **y** to the secrets, the gate
+   and the deletion of the old variables. This updates the federated credential's subject.
+2. Open a pull request from `002-azure-daily-run` to `main` and merge it once its checks pass.
+3. The merge's push to `main` runs `publish-deploy` with the new workflow.
+
+Do not run `gh workflow run ci.yml --ref main` before the merge: it runs the `ci.yml` on `main`,
+which still has the old job that reads repository variables.
 
 **Check Q7, part 1: admin sign-in through the group (research R16).** `db-bootstrap.sh` is the
 first sign-in as `maa-db-admins`. It must print `bootstrap ok`. If it fails with an authentication

@@ -22,7 +22,13 @@ require_az_login
 
 case "$1" in
     open)
-        ip="$(curl -fsS https://api.ipify.org)"
+        # Firewall rules accept IPv4 only, so the lookup is forced onto IPv4 (-4).
+        ip="$(curl -4 -fsS --max-time 10 https://api.ipify.org || true)"
+        if [[ -z $ip ]]; then
+            echo "no public IPv4 address came back from api.ipify.org (does this host have IPv4" >&2
+            echo "connectivity?); PostgreSQL firewall rules accept IPv4 only, so nothing was changed" >&2
+            exit 1
+        fi
         if ! [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
             echo "could not determine this host's public IPv4 address" >&2
             exit 1
@@ -48,8 +54,10 @@ if [[ -z $server ]]; then
     exit 1
 fi
 
+# Long forms only: the current CLI takes the server as --server-name and the rule as --name
+# (--rule-name/-r is gone, and -n now means the rule, not the server).
 az postgres flexible-server firewall-rule update \
-    -g rg-maa-data -n "$server" -r owner-access \
+    --resource-group rg-maa-data --server-name "$server" --name owner-access \
     --start-ip-address "$ip" --end-ip-address "$ip" \
     --output none
 

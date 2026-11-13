@@ -9,6 +9,12 @@ param location string
 @description('GitHub repository allowed to sign in through OIDC, as owner/name.')
 param githubRepository string
 
+@description('Numeric GitHub ID of the repository owner.')
+param githubOwnerId string
+
+@description('Numeric GitHub ID of the repository.')
+param githubRepositoryId string
+
 @description('Object ID of the Entra administrator group (Key Vault Secrets Officer).')
 param dbAdminGroupObjectId string
 
@@ -221,6 +227,12 @@ resource githubIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-1
   location: location
 }
 
+// GitHub issues immutable subject claims for repositories created since 2026-07-15: each name is
+// followed by its numeric ID, repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main
+// (research R7). Names keep GitHub's exact case; deploy.sh reads names and IDs with gh api.
+var githubOwner = split(githubRepository, '/')[0]
+var githubRepoName = split(githubRepository, '/')[1]
+
 resource githubMain 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
   parent: githubIdentity
   name: 'github-main'
@@ -229,7 +241,7 @@ resource githubMain 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedI
     audiences: [
       'api://AzureADTokenExchange'
     ]
-    subject: 'repo:${githubRepository}:ref:refs/heads/main'
+    subject: 'repo:${githubOwner}@${githubOwnerId}/${githubRepoName}@${githubRepositoryId}:ref:refs/heads/main'
   }
 }
 

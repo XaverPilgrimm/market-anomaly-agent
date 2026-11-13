@@ -26,7 +26,7 @@ run_phase() {
     local dbname=$1
     shift
     pg_client psql \
-        "host=$fqdn dbname=$dbname user=$ADMIN_ROLE sslmode=verify-full sslrootcert=system" \
+        "host=$fqdn dbname=$dbname user=$ADMIN_ROLE sslmode=verify-full sslrootcert=$PG_CA_BUNDLE" \
         -v ON_ERROR_STOP=1 -v job_role="$JOB_ROLE" -v admin_role="$ADMIN_ROLE" "$@" \
         -f - <"$SQL"
 }
