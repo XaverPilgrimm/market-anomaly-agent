@@ -7,7 +7,7 @@ The fakes replace module-level names in `market_anomaly_agent.cli`: `run_detecti
 
 import dataclasses
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import TracebackType
@@ -60,7 +60,8 @@ def build_result() -> DetectionResult:
     return DetectionResult(
         evaluated_date=D,
         rule_version="1",
-        computed_at=datetime(2026, 10, 28, 11, 0, tzinfo=UTC),
+        fetched_at=datetime(2026, 10, 28, 11, 0, tzinfo=UTC),
+        computed_at=datetime(2026, 10, 28, 11, 14, tzinfo=UTC),
         benchmark_ticker="QQQ",
         benchmark_return=Decimal("0.005"),
         bars=bars,
@@ -122,7 +123,7 @@ class Fakes:
         evaluated_date: date,
         tickers: Sequence[str],
         source: PriceDataSource,
-        now: datetime,
+        clock: Callable[[], datetime],
     ) -> DetectionResult:
         self.detect_calls.append((evaluated_date, list(tickers)))
         if self.detect_error is not None:
@@ -282,19 +283,44 @@ def test_missing_api_key_exits_1_naming_the_variable(
     assert "PRICE_DATA_API_KEY" in capsys.readouterr().err
 
 
+def test_the_injected_clock_is_passed_to_run_detection(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-014: detection reads its fetch-start and computation instants from the same injected
+    clock as --latest, not from a single instant taken before the fetch."""
+    clocks: list[object] = []
+
+    def recording_detect(
+        evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, clock: object
+    ) -> DetectionResult:
+        clocks.append(clock)
+        return fakes.result
+
+    def clock() -> datetime:
+        return datetime(2026, 10, 28, 11, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(cli, "run_detection", recording_detect)
+
+    assert cli.main(["--date", "2026-10-27"], now=clock) == 0
+    assert clocks == [clock]
+
+
 def test_progress_logs_go_to_stderr_and_stdout_is_only_the_summary(
     fakes: Fakes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """T053 (1): INFO is on by default; progress never reaches stdout."""
 
     def detect_with_progress(
-        evaluated_date: date, tickers: Sequence[str], source: PriceDataSource, now: datetime
+        evaluated_date: date,
+        tickers: Sequence[str],
+        source: PriceDataSource,
+        clock: Callable[[], datetime],
     ) -> DetectionResult:
         logging.getLogger("market_anomaly_agent.detection").info("fetched AAA (2 of 3)")
         logging.getLogger("market_anomaly_agent.data.twelvedata_source").warning(
             "BBB: HTTP 503, retrying in 2 s"
         )
-        return fakes.run_detection(evaluated_date, tickers, source, now)
+        return fakes.run_detection(evaluated_date, tickers, source, clock)
 
     monkeypatch.setattr(cli, "run_detection", detect_with_progress)
 

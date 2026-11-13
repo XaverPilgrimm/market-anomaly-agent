@@ -8,7 +8,7 @@ import logging
 import math
 import re
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -38,7 +38,7 @@ from tests.support.fakes import (
 
 def run(specs: dict[str, StockSpec]) -> tuple[DetectionResult, FakeSource]:
     source = FakeSource(specs)
-    return run_detection(D, list(specs), source, NOW), source
+    return run_detection(D, list(specs), source, lambda: NOW), source
 
 
 def test_fixture_window_is_122_trading_days() -> None:
@@ -280,7 +280,7 @@ def test_45_days_of_history_is_skipped_as_insufficient_history() -> None:
     source = FakeSource(specs)
     keep_paired_returns(source, "SHORT", 45)
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     code, detail = skip_of(result, "SHORT")
     assert code == "insufficient_history"
@@ -298,7 +298,7 @@ def test_80_days_of_history_is_evaluated_on_those_80_returns() -> None:
     source = FakeSource(specs)
     keep_paired_returns(source, "MID", 80)
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     [record] = [r for r in result.evaluated if r.ticker == "MID"]
     assert record.estimation_window_days == 80
@@ -316,7 +316,7 @@ def test_a_missing_bar_on_the_evaluated_or_previous_day_is_missing_data(missing_
     source = FakeSource(specs)
     drop_bars(source, "GAP", missing_day)
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     code, detail = skip_of(result, "GAP")
     assert code == "missing_data"
@@ -329,7 +329,7 @@ def test_a_ticker_the_vendor_has_no_data_for_is_missing_data() -> None:
     source = FakeSource(specs)
     source.raises["GONE"] = PriceDataUnavailable("GONE: symbol not found")
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     assert skip_of(result, "GONE")[0] == "missing_data"
     assert outcomes(result)["GONE"] == "missing_data"
@@ -338,7 +338,7 @@ def test_a_ticker_the_vendor_has_no_data_for_is_missing_data() -> None:
 def test_zero_residual_variance_is_missing_data() -> None:
     specs = {"FLAT": FLAT, **fillers(9)}
 
-    result = run_detection(D, list(specs), FakeSource(specs), NOW)
+    result = run_detection(D, list(specs), FakeSource(specs), lambda: NOW)
 
     assert skip_of(result, "FLAT") == ("missing_data", "zero residual variance")
     assert outcomes(result)["FLAT"] == "missing_data"
@@ -365,7 +365,7 @@ def test_every_ticker_gets_exactly_one_outcome() -> None:
     drop_bars(source, "NOPREV", DAYS[-2])
     source.raises["GONE"] = PriceDataUnavailable("GONE: symbol not found")
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     assert outcomes(result) == {
         **{t: "flagged" for t in qualifying if t != "Q01"},
@@ -387,7 +387,7 @@ def test_flagged_ticker_with_9_volume_days_keeps_its_flag_without_a_ratio() -> N
     source = FakeSource(specs)
     drop_bars(source, "VOL", *DAYS[-21:-10])
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     [case] = result.anomalies
     assert case.ticker == "VOL"
@@ -426,7 +426,7 @@ def test_unusable_benchmark_aborts_the_run(
     break_benchmark(source)
 
     with pytest.raises(BenchmarkUnavailableError) as info:
-        run_detection(D, list(specs), source, NOW)
+        run_detection(D, list(specs), source, lambda: NOW)
 
     assert BENCHMARK_TICKER in str(info.value)
     assert cause in str(info.value)
@@ -450,14 +450,14 @@ def test_21_of_100_missing_data_aborts_the_run() -> None:
     specs, source = _hundred_with_missing(21)
 
     with pytest.raises(TooMuchMissingDataError, match="21 of 100"):
-        run_detection(D, list(specs), source, NOW)
+        run_detection(D, list(specs), source, lambda: NOW)
 
 
 def test_exactly_20_of_100_missing_data_completes() -> None:
     """FR-023: exactly 20% still completes, with the 20 skips recorded."""
     specs, source = _hundred_with_missing(20)
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     assert (
         sorted(s.ticker for s in result.skipped if s.reason_code == "missing_data")
@@ -472,7 +472,7 @@ def test_insufficient_history_does_not_count_toward_the_missing_data_limit() -> 
     for ticker in list(specs)[:25]:
         keep_paired_returns(source, ticker, 50)
 
-    result = run_detection(D, list(specs), source, NOW)
+    result = run_detection(D, list(specs), source, lambda: NOW)
 
     assert [s.reason_code for s in result.skipped] == ["insufficient_history"] * 25
     assert len(result.evaluated) == 75
@@ -487,7 +487,7 @@ def test_price_data_error_propagates_unchanged(ticker: str) -> None:
     source.raises[ticker] = error
 
     with pytest.raises(PriceDataError) as info:
-        run_detection(D, list(specs), source, NOW)
+        run_detection(D, list(specs), source, lambda: NOW)
 
     assert info.value is error
 
@@ -526,10 +526,50 @@ def test_an_unavailable_ticker_keeps_the_fetch_count_consecutive(
     source = FakeSource(specs)
     source.raises["GONE"] = PriceDataUnavailable("GONE: symbol not found")
 
-    run_detection(D, list(specs), source, NOW)
+    run_detection(D, list(specs), source, lambda: NOW)
 
     fetched = [m for m in detection_messages(caplog) if m.startswith("fetched ")]
     assert fetched == [
         f"fetched {t} ({k} of 11)" + (": no data" if t == "GONE" else "")
         for k, t in enumerate([BENCHMARK_TICKER, "GONE", *sorted(fillers(9))], 1)
     ]
+
+
+class SteppingClock:
+    """A fake injected clock: each read returns the current instant and is recorded."""
+
+    def __init__(self, start: datetime) -> None:
+        self.current = start
+        self.reads: list[datetime] = []
+
+    def __call__(self) -> datetime:
+        self.reads.append(self.current)
+        return self.current
+
+
+class ClockAdvancingSource(FakeSource):
+    """Each fetch takes one minute on `clock`, like a real rate-limited fetch."""
+
+    def __init__(self, specs: dict[str, StockSpec], clock: SteppingClock) -> None:
+        super().__init__(specs)
+        self.clock = clock
+
+    def get_daily_bars(self, ticker: str, start: date, end: date) -> list[DailyBar]:
+        self.clock.current += timedelta(minutes=1)
+        return super().get_daily_bars(ticker, start, end)
+
+
+def test_fetch_start_and_computation_instants_come_from_the_injected_clock() -> None:
+    """FR-014: computed_at is when the computation is performed, i.e. after every bar has been
+    fetched, not when the fetch starts. The fetch start is kept separately for the bars'
+    fetched_at. Exactly two reads of the clock: one before the first fetch, one after the last."""
+    clock = SteppingClock(NOW)
+    source = ClockAdvancingSource(US1_SPECS, clock)
+    fetches = len(US1_SPECS) + 1  # the benchmark too
+
+    result = run_detection(D, list(US1_SPECS), source, clock)
+
+    assert len(source.calls) == fetches
+    assert result.fetched_at == NOW
+    assert result.computed_at == NOW + timedelta(minutes=fetches)
+    assert clock.reads == [result.fetched_at, result.computed_at]

@@ -26,8 +26,8 @@
 | # | Check | How | Pass condition |
 |---|---|---|---|
 | Q1 | Region offers everything | Two steps. (a) `infra/scripts/preflight.sh francecentral` (wraps `az postgres flexible-server list-skus -l …` and `az provider show -n Microsoft.App …`): a first filter only, because the listing can pass while provisioning is blocked (it passed `germanywestcentral`, which then refused the probe server; research R2). (b) **The decisive check, a probe**: create a B1ms server in a throwaway resource group, then delete the group (commands below). | (a) `Standard_B1ms` (Burstable) and version `17` listed; `jobs` lists the region. (b) The probe server is created. If either fails, repeat both with the fallback `italynorth` and set `location` in `infra/main.bicepparam` (research R2). |
-| Q2 | Cost in EUR | Azure pricing calculator, chosen region, EUR: B1ms 730 h, 32 GiB storage, two log alert rules | Total ≤ EUR 24 (the 80% notification threshold of the EUR 30 budget, so a normal month never triggers it); update research R10 with the real figures |
-| Q6 | What-if is clean | `infra/scripts/deploy.sh` first runs `entra-bootstrap.sh` (prints `admin group ok`), then stops at the what-if prompt; answer **n** the first time and read it | The group `maa-db-admins` exists with you as its only member (`az ad group member list --group maa-db-admins --query "[].displayName"`). Only the resources in data-model.md §3 are created; nothing outside `rg-maa-data`, `rg-maa-env` and the subscription-scope budget and role is touched. The Entra administrator in the what-if is a `Group`. When you later answer **y** (T028), the first real deployment can fail while the new Key Vault role assignment for `id-maa-job` propagates, for example with an error that the job cannot read its secret reference. `deploy.sh` is idempotent: wait a few minutes and run it again. |
+| Q2 | Cost in EUR | Azure pricing calculator, chosen region, EUR: B1ms 730 h, 32 GiB storage, two log alert rules | Total ≤ EUR 24 (the 80% notification threshold of the EUR 30 budget, so a normal month never triggers it); update research R10 with the real figures. *Result 2026-11-13 (France Central): PostgreSQL B1ms, 730 h, Premium SSD 32 GiB about EUR 16.30; Container Apps, Log Analytics and Key Vault within free grants or a few cents. Passed. The two log alert rules are not priced yet: add them to the estimate when they arrive with US3 (research R10).* |
+| Q6 | What-if is clean | `infra/scripts/deploy.sh` first runs `entra-bootstrap.sh` (prints `admin group ok`), then stops at the what-if prompt; answer **n** the first time and read it | The group `maa-db-admins` exists with you as its only member (`az ad group member list --group maa-db-admins --query "[].displayName"`). Only the resources in data-model.md §3 are created; nothing outside `rg-maa-data`, `rg-maa-env` and the subscription-scope budget and role is touched. The Entra administrator in the what-if is a `Group`. When you later answer **y** (T028), the first real deployment can fail while the new Key Vault role assignment for `id-maa-job` propagates, for example with an error that the job cannot read its secret reference. `deploy.sh` is idempotent: wait a few minutes and run it again. *Result 2026-11-13: passed during the first deployment.* |
 
 **Q1 probe** (host; a few cents at most for the minutes the server exists). The
 `rg-maa-probe` group is separate from the feature's groups and has no lock, so deleting it removes
@@ -106,6 +106,10 @@ unset PGPASSWORD
 | With `/etc/ssl/certs/ca-certificates.crt` (what the job uses) | Prints `(True, 'TLSv1.3')` or `(True, 'TLSv1.2')` |
 | With `/dev/null` (no trusted roots) | Fails with a certificate error, for example `certificate verify failed` or `could not read root certificate file`. This proves the first run really verified the server. |
 
+*Result 2026-11-13: passed.* The bundle run printed `(True, 'TLSv1.3')`; the `/dev/null` run failed
+with "could not read root certificate file". The R8 fallback is not needed. Part 1 (the first
+sign-in through `maa-db-admins`, `bootstrap ok`) also passed.
+
 If the first run fails with a certificate error, switch to the fallback in research R8 (ship
 Microsoft's two roots as `/app/certs/azure-postgres-roots.pem`). The first scheduled or manual
 execution of the job (§4, US1-1) then confirms the same path end to end with the job's own
@@ -118,9 +122,48 @@ settings on GitHub). Without that step, the job cannot pull the image.
 
 | # | Check | How | Pass condition |
 |---|---|---|---|
-| Q3 | Timeout scope (research R1) | Start one execution of a temporary copy of the job with `replicaTimeout 120`, `replicaRetryLimit 2`, command `sh -c 'sleep 50; exit 1'`: `az containerapp job create … --image docker.io/library/busybox:1.37` in `rg-maa-env`. Count the replicas in `az containerapp job execution show`. Delete the copy afterwards. | **3 replicas** ⇒ the timer is per attempt: set `replicaTimeout` to `1800`. **2 replicas** (the third cut off at 120 s) ⇒ the timer is per execution: keep `3600`. Record the result in research R1. |
+| Q3 | Timeout scope (research R1) | Start one execution of a temporary copy of the job with `replicaTimeout 120`, `replicaRetryLimit 2`, command `sh -c 'sleep 50; exit 1'`, image `docker.io/library/busybox:1.37`, in `rg-maa-env`. Create the copy with `az containerapp job create --yaml` from a file outside the repository (see "Q3 job copy" below), not with `--command`/`--args`. Count the replicas in `az containerapp job execution show`. Delete the copy afterwards. | **3 replicas** ⇒ the timer is per attempt: set `replicaTimeout` to `1800`. **2 replicas** (the third cut off at 120 s) ⇒ the timer is per execution: keep `3600`. Record the result in research R1. *Result 2026-11-13: 2 replicas (started 11 s and 79 s after the execution start; the second cut off at 120 s; no third). Per execution: `3600` stays (research R1).* |
 | Q4 | Failure alert fires | Start one execution with an overridden argument that fails fast: `az containerapp job start … --args "--date" "2026-11-08"` (a Sunday, so exit 2) | Within 15 minutes an email arrives from `alert-maa-execution-failed`. Read the actual `Reason_s` and columns in `log-maa`, and pin them in the rule (research R9). |
-| Q5 | Pipeline least privilege | First `push` to `main` after deployment | `publish-deploy` succeeds with the custom role only. If it fails with an authorization error, add exactly the missing action and record it in research R7. The likeliest one is `Microsoft.App/managedEnvironments/join/action`: updating a job can require it on the environment `cae-maa`. If so, grant it on the environment's scope only (a second, narrow custom role or an extra assignment), not by widening the role on the job. |
+| Q5 | Pipeline least privilege | First `push` to `main` after deployment | `publish-deploy` succeeds with the custom role only. If it fails with an authorization error, add exactly the missing action and record it in research R7. The likeliest one is `Microsoft.App/managedEnvironments/join/action`: updating a job can require it on the environment `cae-maa`. If so, grant it on the environment's scope only (a second, narrow custom role or an extra assignment), not by widening the role on the job. *Result 2026-11-13: passed with the custom role only; `managedEnvironments/join/action` was not needed (research R7).* |
+
+**Q3 job copy.** `az containerapp job create … --args "-c" "sleep 50; exit 1"` is rejected with
+"unrecognized arguments": the CLI parses a value that starts with `-` as an option of its own. So
+the copy is described in a YAML file and created with `--yaml`. The file holds the environment's
+resource ID, so keep it **outside the repository** (for example in your home directory) and delete
+it afterwards. Read the ID at run time with
+`az containerapp env show -n cae-maa -g rg-maa-env --query id -o tsv` and put it in place of
+`<environment-id>`:
+
+```yaml
+location: francecentral
+properties:
+  environmentId: <environment-id>
+  configuration:
+    triggerType: Manual
+    replicaTimeout: 120
+    replicaRetryLimit: 2
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+  template:
+    containers:
+      - name: q3
+        image: docker.io/library/busybox:1.37
+        command: ["sh", "-c", "sleep 50; exit 1"]
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+```
+
+```bash
+az containerapp job create -n job-maa-q3 -g rg-maa-env --yaml ~/maa-q3.yaml --output none
+az containerapp job start -n job-maa-q3 -g rg-maa-env
+# a few minutes later; count the replicas and their start times
+az containerapp job execution list -n job-maa-q3 -g rg-maa-env -o table
+az containerapp job execution show -n job-maa-q3 -g rg-maa-env --job-execution-name <execution-name>
+az containerapp job delete -n job-maa-q3 -g rg-maa-env --yes
+rm ~/maa-q3.yaml
+```
 
 ## 4. Feature scenarios
 

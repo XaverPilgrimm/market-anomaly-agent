@@ -179,8 +179,17 @@ if [[ $answer == [yY] ]]; then
 fi
 
 # The three values used to be repository variables (before 2026-11-13); offer to remove them.
+# The names come from the REST API (gh api, as for the repository IDs above), not from
+# `gh variable get`, and a failed listing is reported instead of being taken to mean "none left":
+# the earlier `if gh variable get … >/dev/null 2>&1` silently skipped every offer (tasks.md T025).
+# Only names are read; the values are never fetched.
+if ! existing_vars="$(gh api "repos/$repository/actions/variables" --paginate --jq '.variables[].name')"; then
+    echo "could not list the repository variables; check by hand for old AZURE_CLIENT_ID," >&2
+    echo "AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID variables (gh variable list) and delete them" >&2
+    existing_vars=""
+fi
 for var in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
-    if gh variable get "$var" --repo "$repository" >/dev/null 2>&1; then
+    if grep -qxF "$var" <<<"$existing_vars"; then
         read -r -p "Delete the old repository variable $var (now a secret)? [y/N] " answer
         if [[ $answer == [yY] ]]; then
             gh variable delete "$var" --repo "$repository"
