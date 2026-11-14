@@ -1,8 +1,10 @@
 """quickstart.md scenarios 1-5 in-process: `cli.main` against a real local PostgreSQL, with a
 fixture universe file and the shared fake price source from tests/support/fakes.py."""
 
+import dataclasses
 from collections.abc import Callable, Sequence
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -488,3 +490,34 @@ def test_latest_stores_the_same_rows_as_an_explicit_date(
     assert without_timestamps(table_contents(migrated_conn, TABLES)) == latest_rows
     assert capsys.readouterr().out == latest_out
     assert latest_out.strip().splitlines()[-1] == SUMMARY
+
+
+@pytest.mark.integration
+def test_latest_with_the_day_already_stored_fetches_nothing_and_never_exits_3(
+    detect: Detect,
+    migrated_conn: Conn,
+    source: FakeSource,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """002 US2 (T031), FR-002, SC-002: a repeated start on a stored day makes no vendor request
+    and writes nothing, so even a vendor correction since the first run cannot cause exit 3."""
+    detect.argv = LATEST_ARGV
+    detect.now = lambda: NOW
+    assert detect() == 0
+    before = table_contents(migrated_conn, ALL_TABLES)
+    i = next(n for n, b in enumerate(source.bars["FLAG"]) if b.trading_date == DAYS[-2])
+    source.bars["FLAG"][i] = dataclasses.replace(
+        source.bars["FLAG"][i], close=source.bars["FLAG"][i].close + Decimal("0.01")
+    )
+    source.calls.clear()
+    capsys.readouterr()
+    caplog.clear()
+    caplog.set_level("INFO")
+
+    assert detect() == 0
+
+    assert source.calls == []
+    assert table_contents(migrated_conn, ALL_TABLES) == before
+    assert capsys.readouterr().out.strip().splitlines()[-1] == SUMMARY
+    assert f"{D.isoformat()} already stored; nothing fetched" in caplog.text
