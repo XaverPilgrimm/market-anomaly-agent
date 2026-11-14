@@ -332,13 +332,13 @@ a successful one finishes in under 2 minutes, uses 0 vendor credits and adds no 
 
 ### Tests for User Story 2 ⚠️ write first, see them fail
 
-- [ ] T030 [P] [US2] Extend `tests/unit/test_cli.py` with a faked `load_run` that returns a `StoredRun` for the resolved day, under `--latest`:
+- [X] T030 [P] [US2] Extend `tests/unit/test_cli.py` with a faked `load_run` that returns a `StoredRun` for the resolved day, under `--latest`:
   - The source factory is never called, `PRICE_DATA_API_KEY` may be unset, `load_universe_tickers`, `run_detection`, `load_bar_snapshot` and `save_run` are not called, and the exit code is 0.
   - The last stdout line equals the stored summary.
   - The INFO line `2026-11-09 already stored; nothing fetched` is logged.
   - The holiday case: `now` on Fri 2026-11-27 11:00 UTC resolves to 2026-11-25, which is stored, so exit 0.
   - With `--date` and the same stored run, the 001 reproduce path still runs (`run_detection` is called).
-- [ ] T031 [P] [US2] Extend `tests/integration/test_detect_end_to_end.py`:
+- [X] T031 [P] [US2] Extend `tests/integration/test_detect_end_to_end.py`:
   - After a first `--latest` run stores the day, change a bar in the fake source (as the existing exit-3 test does). A second `--latest` run exits 0 (not 3), the fake source records 0 calls, and `table_contents` is unchanged.
 
 ### Implementation for User Story 2
@@ -385,6 +385,7 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
 - [ ] T039 [US3] Run check Q4 from quickstart.md §3, in two parts:
   - (owner, host) Start the job once with failing args (`--date 2026-11-08`, a Sunday, exit 2 on every attempt). Confirm a failure email within 15 minutes. Then query `log-maa` and copy the real `Reason_s` values and column names of the failed attempts and execution.
   - (agent, from the owner's notes) Pin those values in the queries of `infra/modules/env.bicep` (T035 and T036), and record them in research R9.
+  - *Note 2026-11-14, open:* the quickstart.md Q4 command `az containerapp job start … --args "--date" "2026-11-08"` will likely fail with "unrecognized arguments", as `--args "-c" …` did in Q3 (T037), because the Azure CLI parses a value that starts with `-` as its own option. Check `az containerapp job start --help` on the host and decide the override method (for example `--yaml`, or `--args=…`) before running Q4; fix the Q4 row then.
 - [ ] T040 [US3] (owner, host) Validate quickstart.md §4 row US3/SC-008: set an invalid value with `az keyvault secret set`, start once, and confirm ≤ 3 attempts, nothing stored and a failure email. Then restore the real key.
 
 **Checkpoint**: failures are bounded, stopped in time and reported.

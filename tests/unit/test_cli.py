@@ -527,3 +527,120 @@ def test_issued_access_tokens_are_scrubbed_from_errors_and_tracebacks(
     ]
     assert len(tracebacks) == 1
     assert tracebacks[0].endswith("RuntimeError: login failed with token ***")
+
+
+# --- Feature 002 US2: `--latest` with the resolved day already stored (T030) ---------------
+# FR-002, SC-002: no vendor request, no write, no exit 3, and the API key is never needed.
+
+ALREADY_STORED_SUMMARY = (
+    "evaluated_date=2026-11-09 status=completed flagged=10 evaluated=94 skipped=10 rule_version=1"
+)
+HOLIDAY_NOW = datetime(2026, 11, 27, 11, 0, tzinfo=UTC)  # Fri 06:00 New York, after Thanksgiving
+HOLIDAY_DAY = date(2026, 11, 25)  # Wed, the most recent completed trading day
+
+
+class StoredDayFakes:
+    """Records every call the fetch path would make, on top of `Fakes`."""
+
+    def __init__(self, fakes: Fakes, monkeypatch: pytest.MonkeyPatch, day: date) -> None:
+        self.load_run_days: list[date] = []
+        self.universe_calls = 0
+        self.snapshot_calls = 0
+        fakes.stored = dataclasses.replace(stored_run_for(fakes.result), evaluated_date=day)
+
+        def load_run(conn: Any, evaluated_date: date) -> StoredRun | None:
+            self.load_run_days.append(evaluated_date)
+            return fakes.stored if evaluated_date == day else None
+
+        def load_universe_tickers() -> list[str]:
+            self.universe_calls += 1
+            return ["AAA", "BBB"]
+
+        def load_bar_snapshot(conn: Any, evaluated_date: date) -> dict[str, list[DailyBar]]:
+            self.snapshot_calls += 1
+            return fakes.load_bar_snapshot(conn, evaluated_date)
+
+        monkeypatch.setattr(cli, "load_run", load_run)
+        monkeypatch.setattr(cli, "load_universe_tickers", load_universe_tickers)
+        monkeypatch.setattr(cli, "load_bar_snapshot", load_bar_snapshot)
+
+
+def assert_nothing_fetched_or_written(fakes: Fakes, stored_day: StoredDayFakes) -> None:
+    assert fakes.source_keys == []  # the source factory is never called
+    assert fakes.detect_calls == []
+    assert fakes.saved == []
+    assert stored_day.universe_calls == 0
+    assert stored_day.snapshot_calls == 0
+
+
+def test_latest_with_the_day_already_stored_exits_0_without_fetching(
+    fakes: Fakes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    stored_day = StoredDayFakes(fakes, monkeypatch, LATEST_DAY)
+    monkeypatch.delenv("PRICE_DATA_API_KEY")  # not needed when nothing is fetched
+
+    assert cli.main(["--latest"], now=lambda: LATEST_NOW) == 0
+
+    assert stored_day.load_run_days == [LATEST_DAY]
+    assert_nothing_fetched_or_written(fakes, stored_day)
+    assert last_line(capsys.readouterr().out) == ALREADY_STORED_SUMMARY
+    assert "2026-11-09 already stored; nothing fetched" in info_messages(caplog)
+
+
+def test_latest_with_the_day_already_stored_fetches_nothing_even_with_an_api_key(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The Azure case: the key is set, yet a stored day must not be re-fetched (SC-002)."""
+    stored_day = StoredDayFakes(fakes, monkeypatch, LATEST_DAY)
+
+    assert cli.main(["--latest"], now=lambda: LATEST_NOW) == 0
+
+    assert_nothing_fetched_or_written(fakes, stored_day)
+    assert last_line(capsys.readouterr().out) == ALREADY_STORED_SUMMARY
+
+
+def test_latest_with_migrate_and_the_day_already_stored_migrates_then_stops(
+    fakes: Fakes, migrations: MigrationFakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scheduled job's args: migrations still run first, then the stored day ends the run."""
+    fakes.stored = dataclasses.replace(stored_run_for(fakes.result), evaluated_date=LATEST_DAY)
+    monkeypatch.delenv("PRICE_DATA_API_KEY")
+
+    assert cli.main(["--latest", "--migrate"], now=lambda: LATEST_NOW) == 0
+
+    assert migrations.order == ["migrate", "load_run"]
+    assert fakes.source_keys == [] and fakes.detect_calls == [] and fakes.saved == []
+
+
+def test_latest_on_the_morning_after_a_holiday_finds_the_stored_day_and_exits_0(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SC-003: Thanksgiving (Thu 2026-11-26) is closed, so Friday's start resolves to Wednesday,
+    which Thursday's start already stored."""
+    stored_day = StoredDayFakes(fakes, monkeypatch, HOLIDAY_DAY)
+    monkeypatch.delenv("PRICE_DATA_API_KEY")
+
+    assert cli.main(["--latest"], now=lambda: HOLIDAY_NOW) == 0
+
+    assert stored_day.load_run_days == [HOLIDAY_DAY]
+    assert_nothing_fetched_or_written(fakes, stored_day)
+    assert last_line(capsys.readouterr().out).startswith("evaluated_date=2026-11-25 ")
+
+
+def test_date_with_the_day_already_stored_still_fetches_and_reproduces(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The 001 reproduce path is unchanged for --date: it fetches and compares the snapshot."""
+    StoredDayFakes(fakes, monkeypatch, LATEST_DAY)
+    fakes.stored_bars = {t: list(bars) for t, bars in fakes.result.bars.items()}
+
+    assert cli.main(["--date", "2026-11-09"], now=lambda: LATEST_NOW) == 0
+
+    assert fakes.detect_calls == [(LATEST_DAY, ["AAA", "BBB"])]
+    assert fakes.source_keys == [API_KEY]
+    assert fakes.saved == []
+    assert last_line(capsys.readouterr().out) == ALREADY_STORED_SUMMARY
