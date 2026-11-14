@@ -1,7 +1,8 @@
 """`detect --date YYYY-MM-DD | --latest [--migrate]` (001 and 002 contracts/cli-contract.md).
 
 `--date` evaluates the given trading day. `--latest` resolves the most recent completed NASDAQ
-trading day in New York time itself (002 FR-001). `--migrate` applies pending database migrations
+trading day in New York time itself (002 FR-001) and, if that day is already stored, exits 0
+without fetching or writing anything (002 FR-002). `--migrate` applies pending database migrations
 first (002 FR-006).
 
 Exit codes: 0 completed or reproduced, 1 unexpected error, 2 usage error, 3 re-run rejected
@@ -179,6 +180,15 @@ def main(
             with connect() as conn:
                 applied = apply_migrations(conn)
             log.info("applied migration(s): %s", ", ".join(applied) or "none")
+        if args.latest:
+            # 002 FR-002: a stored day ends the run before the API key, universe or vendor is
+            # touched, so repeated starts and holidays cost nothing and never exit 3.
+            with connect() as conn:
+                stored = load_run(conn, evaluated_date)
+            if stored is not None:
+                log.info("%s already stored; nothing fetched", evaluated_date.isoformat())
+                print(_stored_summary(stored))
+                return EXIT_OK
         return _run(evaluated_date, source_factory or TwelveDataPriceDataSource, now or _utc_now)
     except RunAbortedError as exc:
         log.error("run for %s aborted, nothing stored: %s", evaluated_date, _scrub(str(exc)))
