@@ -469,6 +469,15 @@ be read from the workspace and set in the rule. Rule 2 guards against getting th
 **Alternatives considered**: Event Grid or a function app reacting to job events. Rejected: an
 extra service (Principle II).
 
+*Implemented 2026-11-14 (tasks.md T034–T036), not yet deployed:* `Microsoft.Insights/actionGroups@2023-01-01`
+(newest GA; 2024-10-01 is preview) and `Microsoft.Insights/scheduledQueryRules@2026-03-01` (newest
+GA). Two deviations from the plan: rule 2's `windowSize` is `PT3H`, not `PT2H`, because the
+window also filters the tables and an evaluation at 13:45 must still see a line from 11:00; and
+it matches `Log_s contains 'status=completed'` instead of `has`, because `has` matches whole
+terms and `=` splits the string into two. Both rules set `skipQueryValidation: true`, because a
+recreated workspace (US4) has no `_CL` tables until the environment writes logs, and validation
+would fail the deployment. The reason strings and column names stay provisional until Q4.
+
 ## R10. Monthly cost estimate and budget
 
 **Cap**: the constitution (v1.2.0, Principle V) sets the Azure cap at **EUR 30** per month. It is

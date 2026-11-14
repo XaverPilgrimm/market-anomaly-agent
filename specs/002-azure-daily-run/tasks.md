@@ -363,12 +363,13 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
 
 ### Implementation for User Story 3
 
-- [ ] T034 [US3] In `infra/modules/env.bicep`, add action group `ag-maa-owner`: short name `maa`, one email receiver from `alertEmail`, `useCommonAlertSchema: true`.
-- [ ] T035 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-execution-failed` (research R9):
+- [X] T034 [US3] In `infra/modules/env.bicep`, add action group `ag-maa-owner`: short name `maa`, one email receiver from `alertEmail`, `useCommonAlertSchema: true`.
+- [X] T035 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-execution-failed` (research R9):
   - Scope `log-maa`; `evaluationFrequency: 'PT5M'`; `windowSize: 'PT10M'`; severity 2; action `ag-maa-owner`; `autoMitigate: false`.
   - Query: `ContainerAppSystemLogs_CL | where JobName_s == 'job-maa-detect' | where Reason_s has_any (dynamic(['Failed','BackOff','Error','Timeout','DeadlineExceeded'])) or Log_s has_any (dynamic(['failed','timed out','deadline'])) | project TimeGenerated, ExecutionName_s, Reason_s, Log_s`, with the condition count > 0.
   - Add a Bicep comment that the reason strings are provisional until check Q4 (T039) pins them.
-- [ ] T036 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-no-completed-run` (research R9):
+  - *Done 2026-11-14 (T034–T036, not built or deployed yet: no `az` in the agent container):* API versions `actionGroups@2023-01-01` and `scheduledQueryRules@2026-03-01` (newest GA in the template reference). Both rules are `kind: 'LogAlert'` with `timeAggregation: 'Count'`, `operator: 'GreaterThan'`, `threshold: 0` and `skipQueryValidation: true` (a recreated workspace has no `_CL` tables yet). The action group's address is the `alertEmail` deploy input only.
+- [X] T036 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-no-completed-run` (research R9):
   - Scope `log-maa`; `evaluationFrequency: 'PT1H'`; `windowSize: 'PT2H'`; severity 2; action `ag-maa-owner`.
   - The query returns one row only when all of these hold:
     - `dayofweek(now())` is Tuesday to Saturday (2d to 6d);
@@ -376,6 +377,7 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
     - `ContainerAppConsoleLogs_CL | where ContainerJobName_s == 'job-maa-detect' and TimeGenerated >= startofday(now()) + 11h and Log_s has 'status=completed'` returns no rows.
 
     Write it as `let completed = toscalar(…| count); print fire = …| where fire`. Add a comment that the column name `ContainerJobName_s` is confirmed in Q4.
+  - *Changed 2026-11-14:* `windowSize` is `PT3H`, not `PT2H`: the window also filters the tables, so an evaluation at 13:45 with `PT2H` would miss a `status=completed` line from 11:14 and alert falsely. The match is `Log_s contains 'status=completed'` instead of `has`, which matches whole terms (`=` is a separator). Recorded in research R9.
 - [X] T037 [US3] (owner, host) Run check Q3 from quickstart.md §3: create a temporary job copy in `rg-maa-env` with `replicaTimeout 120`, `replicaRetryLimit 2` and image `docker.io/library/busybox:1.37` running `sh -c 'sleep 50; exit 1'`. Start it once, count the replicas, and delete it.
   - 3 replicas: set `jobReplicaTimeoutSeconds = 1800` in `infra/main.bicepparam` and redeploy.
   - 2 replicas: keep 3600.
@@ -388,6 +390,7 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
   - (owner, host) Start the job once with failing args (`--date 2026-11-08`, a Sunday, exit 2 on every attempt). Confirm a failure email within 15 minutes. Then query `log-maa` and copy the real `Reason_s` values and column names of the failed attempts and execution.
   - (agent, from the owner's notes) Pin those values in the queries of `infra/modules/env.bicep` (T035 and T036), and record them in research R9.
   - *Note 2026-11-14, open:* the quickstart.md Q4 command `az containerapp job start … --args "--date" "2026-11-08"` will likely fail with "unrecognized arguments", as `--args "-c" …` did in Q3 (T037), because the Azure CLI parses a value that starts with `-` as its own option. Check `az containerapp job start --help` on the host and decide the override method (for example `--yaml`, or `--args=…`) before running Q4; fix the Q4 row then.
+  - *Updated 2026-11-14:* quickstart.md §3 now has a "Q4 failing start" block using `--args=--date=2026-11-08` with `--image`, `--container-name`, `--cpu` and `--memory` given explicitly, plus a `--yaml` fallback. It is unverified until checked with `--help` on the host.
 - [ ] T040 [US3] (owner, host) Validate quickstart.md §4 row US3/SC-008: set an invalid value with `az keyvault secret set`, start once, and confirm ≤ 3 attempts, nothing stored and a failure email. Then restore the real key.
 
 **Checkpoint**: failures are bounded, stopped in time and reported.
