@@ -448,7 +448,8 @@ rules on the Log Analytics workspace:
    `ContainerAppSystemLogs_CL` rows (or `ContainerAppSystemLogs`, whichever the workspace has) for
    `job-maa-detect` that report a failed execution or a failed or timed-out replica. Each attempt's
    failure fires it, so the owner may get up to 3 emails for one bad execution. FR-022 asks for at
-   least one; deduplicating is not worth the extra machinery. This rule meets SC-004 (within
+   least one; deduplicating is not worth the extra machinery. *(Superseded 2026-11-16 by Q4: one
+   alert per failed execution, see below.)* This rule meets SC-004 (within
    15 minutes).
 2. **No completed run**: evaluated every hour (`PT1H`). Scheduled query rules run at a fixed
    frequency, not at a time of day, so the query itself holds the schedule. It returns a row only
@@ -477,6 +478,34 @@ it matches `Log_s contains 'status=completed'` instead of `has`, because `has` m
 terms and `=` splits the string into two. Both rules set `skipQueryValidation: true`, because a
 recreated workspace (US4) has no `_CL` tables until the environment writes logs, and validation
 would fail the deployment. The reason strings and column names stay provisional until Q4.
+
+*Pinned 2026-11-16 from check Q4 (run 2026-11-14):*
+- **Forcing the failure:** `az containerapp job start … --image "$image" --container-name detect
+  --cpu 0.5 --memory 1.0Gi --args=--date=2026-11-08`. The `--args=` form passes a value that
+  starts with `-` without "unrecognized arguments". The execution failed after 3 attempts, each
+  logging `detect: error: 2026-11-08 is not a NASDAQ trading day`.
+- **Columns:** `ContainerAppSystemLogs_CL` has `JobName_s`, `ExecutionName_s`, `ReplicaName_s`,
+  `Reason_s`, `Log_s`, `Type_s` and `EventSource_s`; `ContainerAppConsoleLogs_CL` has
+  `ContainerJobName_s`, `ContainerGroupName_s`, `ContainerName_s` and `Log_s`. So `JobName_s`
+  (rule 1) and `ContainerJobName_s` (rule 2) are confirmed.
+- **Reasons:** each failed attempt logs `Error`; the execution then logs `BackoffLimitExceeded`
+  when the retries are used up. The Q3 timeout execution logged `Error` and `DeadlineExceeded`.
+  Rule 1 now matches only `Reason_s in ('BackoffLimitExceeded', 'DeadlineExceeded')` for
+  `job-maa-detect`, summarized to one row per `ExecutionName_s`: one alert per failed
+  execution instead of one per attempt.
+- **Emails:** the provisional rule sent two "Fired" emails for the one execution, the first about
+  8 minutes after the start (SC-004 passes) and a duplicate 5 minutes later, because the
+  10-minute window evaluated every 5 minutes saw the same rows twice. The overlap stays, for late
+  logs; `muteActionsDuration: 'PT1H'` suppresses the repeat. The reference documents
+  `muteActionsDuration` for `kind: LogAlert` and states no constraint with `autoMitigate`; its own
+  sample uses `autoMitigate: false`. The rule has no dimensions, so the mute applies to the whole
+  rule.
+- **Provider registration:** `Microsoft.Insights` was `NotRegistered` in this subscription; the
+  owner registered it on 2026-11-14 (`az provider register -n Microsoft.Insights --wait`).
+  `preflight.sh` now checks `Microsoft.App`, `Microsoft.Consumption` (budget, US5),
+  `Microsoft.DBforPostgreSQL`, `Microsoft.Insights`, `Microsoft.KeyVault`,
+  `Microsoft.ManagedIdentity` and `Microsoft.OperationalInsights` and prints the register command for
+  any that is not `Registered`.
 
 ## R10. Monthly cost estimate and budget
 

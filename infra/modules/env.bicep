@@ -274,16 +274,20 @@ resource ownerActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   }
 }
 
-// Fires on every failed or timed-out attempt, so one bad execution can send up to 3 emails.
-// PROVISIONAL: the Reason_s strings and the JobName_s column are guesses from community guides
-// until check Q4 (tasks.md T039) reads the real values from log-maa and pins them here.
+// Fires once per failed execution. Pinned by check Q4 (tasks.md T039, research R9): each failed
+// attempt logs Reason_s "Error", and the execution itself ends with "BackoffLimitExceeded"
+// (retries used up) or "DeadlineExceeded" (replicaTimeout reached). Only the two execution-level
+// reasons are matched, one row per execution. The 10-minute window evaluated every 5 minutes
+// overlaps to catch late logs; muteActionsDuration keeps that overlap from sending a second
+// email for the same failure. The mute covers the whole rule, so a second failed execution
+// within the hour (only possible with a manual start) sends no further email.
 resource executionFailedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: 'alert-maa-execution-failed'
   location: location
   kind: 'LogAlert'
   properties: {
     displayName: 'alert-maa-execution-failed'
-    description: 'An attempt or execution of job-maa-detect failed or timed out (research R9).'
+    description: 'An execution of job-maa-detect failed: retries used up or replica timeout reached (research R9).'
     severity: 2
     enabled: true
     evaluationFrequency: 'PT5M'
@@ -297,7 +301,7 @@ resource executionFailedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppSystemLogs_CL | where JobName_s == \'job-maa-detect\' | where Reason_s has_any (dynamic([\'Failed\', \'BackOff\', \'Error\', \'Timeout\', \'DeadlineExceeded\'])) or Log_s has_any (dynamic([\'failed\', \'timed out\', \'deadline\'])) | project TimeGenerated, ExecutionName_s, Reason_s, Log_s'
+          query: 'ContainerAppSystemLogs_CL | where JobName_s == \'job-maa-detect\' and Reason_s in (\'BackoffLimitExceeded\', \'DeadlineExceeded\') | summarize arg_max(TimeGenerated, Reason_s, Log_s) by ExecutionName_s'
           timeAggregation: 'Count'
           operator: 'GreaterThan'
           threshold: 0
@@ -308,7 +312,10 @@ resource executionFailedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01
         }
       ]
     }
+    // Stateless (no auto-resolve): every failure is its own alert; actions are muted for an hour
+    // after one fires. No dimensions are set, so the mute covers the whole rule.
     autoMitigate: false
+    muteActionsDuration: 'PT1H'
     actions: {
       actionGroups: [
         ownerActionGroup.id
@@ -323,7 +330,7 @@ resource executionFailedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01
 // "already stored" start prints that line too (FR-002), so every healthy scheduled day has one.
 // The window is PT3H, not PT2H: the rule's window also filters the tables, and an evaluation at
 // 13:45 must still see a line from 11:00.
-// PROVISIONAL: the column name ContainerJobName_s is confirmed in check Q4 (tasks.md T039).
+// ContainerJobName_s is the console table's job column (confirmed in check Q4, tasks.md T039).
 var noCompletedRunQuery = '''
 let completed = toscalar(ContainerAppConsoleLogs_CL
     | where ContainerJobName_s == 'job-maa-detect'
