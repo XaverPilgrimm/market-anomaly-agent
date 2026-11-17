@@ -507,6 +507,12 @@ would fail the deployment. The reason strings and column names stay provisional 
   `Microsoft.ManagedIdentity` and `Microsoft.OperationalInsights` and prints the register command for
   any that is not `Registered`.
 
+*Retest 2026-11-16/17, after the redeploy with the pinned rule:* `muteActionsDuration: 'PT1H'`
+together with `autoMitigate: false` was accepted and is live. A deliberate failing start on
+2026-11-16 at 21:22 UTC sent exactly one email, so the duplicate is gone. The scheduled run on
+2026-11-17 succeeded in about 13 minutes, and rule 2 (`alert-maa-no-completed-run`) sent no
+email that day, so its 12:45–13:45 UTC evaluation found the `status=completed` line as intended.
+
 ## R10. Monthly cost estimate and budget
 
 **Cap**: the constitution (v1.2.0, Principle V) sets the Azure cap at **EUR 30** per month. It is
