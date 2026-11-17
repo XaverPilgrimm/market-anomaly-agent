@@ -1,7 +1,7 @@
 // rg-maa-env: everything that can be deleted and recreated (logs, environment, Key Vault, job,
 // pipeline identity, alerts). Design: specs/002-azure-daily-run/data-model.md §3,
 // contracts/deployment-contract.md §4 and research.md R1, R5, R7, R9.
-// Alerts and the action group are added by tasks.md T034–T036.
+// Alerts and the action group: tasks.md T034–T036 (research R9).
 
 @description('Azure region.')
 param location string
@@ -252,6 +252,131 @@ resource githubUpdatesJob 'Microsoft.Authorization/roleAssignments@2022-04-01' =
     roleDefinitionId: jobImageUpdaterRoleId
     principalId: githubIdentity.properties.principalId
     principalType: 'ServicePrincipal'
+  }
+}
+
+// --- Failure alerts (FR-022, SC-004, research R9) -----------------------------------------------
+
+// The address comes from deploy.sh at deployment time and is never written into the repository.
+resource ownerActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: 'ag-maa-owner'
+  location: 'global'
+  properties: {
+    groupShortName: 'maa'
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'owner'
+        emailAddress: alertEmail
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+// Fires once per failed execution. Pinned by check Q4 (tasks.md T039, research R9): each failed
+// attempt logs Reason_s "Error", and the execution itself ends with "BackoffLimitExceeded"
+// (retries used up) or "DeadlineExceeded" (replicaTimeout reached). Only the two execution-level
+// reasons are matched, one row per execution. The 10-minute window evaluated every 5 minutes
+// overlaps to catch late logs; muteActionsDuration keeps that overlap from sending a second
+// email for the same failure. The mute covers the whole rule, so a second failed execution
+// within the hour (only possible with a manual start) sends no further email.
+resource executionFailedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: 'alert-maa-execution-failed'
+  location: location
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'alert-maa-execution-failed'
+    description: 'An execution of job-maa-detect failed: retries used up or replica timeout reached (research R9).'
+    severity: 2
+    enabled: true
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT10M'
+    scopes: [
+      logs.id
+    ]
+    // The _CL tables appear only once the environment has written logs, so a freshly recreated
+    // workspace (US4) would fail query validation at deployment.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppSystemLogs_CL | where JobName_s == \'job-maa-detect\' and Reason_s in (\'BackoffLimitExceeded\', \'DeadlineExceeded\') | summarize arg_max(TimeGenerated, Reason_s, Log_s) by ExecutionName_s'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless (no auto-resolve): every failure is its own alert; actions are muted for an hour
+    // after one fires. No dimensions are set, so the mute covers the whole rule.
+    autoMitigate: false
+    muteActionsDuration: 'PT1H'
+    actions: {
+      actionGroups: [
+        ownerActionGroup.id
+      ]
+    }
+  }
+}
+
+// Alert rules run at a fixed frequency, not at a time of day, so the query holds the schedule:
+// it returns a row only in the hourly evaluation between 12:45 and 13:45 UTC, Tuesday to
+// Saturday, when no "status=completed" line from job-maa-detect exists since 11:00 UTC. An
+// "already stored" start prints that line too (FR-002), so every healthy scheduled day has one.
+// The window is PT3H, not PT2H: the rule's window also filters the tables, and an evaluation at
+// 13:45 must still see a line from 11:00.
+// ContainerJobName_s is the console table's job column (confirmed in check Q4, tasks.md T039).
+var noCompletedRunQuery = '''
+let completed = toscalar(ContainerAppConsoleLogs_CL
+    | where ContainerJobName_s == 'job-maa-detect'
+        and TimeGenerated >= startofday(now()) + 11h
+        and Log_s contains 'status=completed'
+    | count);
+print fire = dayofweek(now()) between (2d .. 6d)
+    and now() between (startofday(now()) + 12h + 45m .. startofday(now()) + 13h + 45m)
+    and completed == 0
+| where fire
+'''
+
+resource noCompletedRunAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: 'alert-maa-no-completed-run'
+  location: location
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'alert-maa-no-completed-run'
+    description: 'No completed run of job-maa-detect since 11:00 UTC on a scheduled day (research R9).'
+    severity: 2
+    enabled: true
+    evaluationFrequency: 'PT1H'
+    windowSize: 'PT3H'
+    scopes: [
+      logs.id
+    ]
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: noCompletedRunQuery
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        ownerActionGroup.id
+      ]
+    }
   }
 }
 

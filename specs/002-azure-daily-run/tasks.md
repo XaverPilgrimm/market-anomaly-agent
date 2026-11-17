@@ -345,7 +345,8 @@ a successful one finishes in under 2 minutes, uses 0 vendor credits and adds no 
 
 - [X] T032 [US2] In `src/market_anomaly_agent/cli.py`, for `--latest` after the optional migrations and before reading `PRICE_DATA_API_KEY`: open `connect()`, `load_run(conn, day)`, and if it is found, log the already-stored line, print `_stored_summary(stored)` and return `EXIT_OK`. Otherwise call `_run` unchanged. Move the API-key check so it is reached only on the fetch path. Makes T030 and T031 pass. Then rerun the T015 command set.
   *Done 2026-11-14:* the `--latest` check sits in `main` after the migrations; `--date` is unchanged and still re-fetches and reproduces (or exits 3). The API-key check was already inside `_run`, so it is now reached only on the fetch path. The key stays the evaluated day alone: a stored run with an older rule version is still skipped (001 FR-018, 002 FR-002); re-evaluating after a rule change would be a future spec change. Cause recorded from Azure: the 2026-11-13 scheduled start re-fetched every series for about 14 minutes before reproducing the stored day. T015 set: ruff, format and mypy clean; 163 unit and 37 integration tests pass.
-- [ ] T033 [US2] (owner, host) Validate quickstart.md §4 rows US2/SC-002 and US2/SC-003 after the pipeline has deployed the T032 image: a second manual start succeeds in under 2 minutes, with "already stored" in the log, 0 new Twelve Data credits and unchanged row counts.
+- [X] T033 [US2] (owner, host) Validate quickstart.md §4 rows US2/SC-002 and US2/SC-003 after the pipeline has deployed the T032 image: a second manual start succeeds in under 2 minutes, with "already stored" in the log, 0 new Twelve Data credits and unchanged row counts.
+  *Done 2026-11-14:* after the US2 deploy (image 3e756e8f), a manual start succeeded in 39 s with "already stored; nothing fetched" in the log, no `fetched` lines and 0 new Twelve Data credits (quickstart.md §4, row US2/SC-002). The owner query (deployment-contract.md §6) after the start shows the `detection_runs` row count unchanged and its latest `computed_at` still from the 11:00 UTC scheduled run, so nothing was written. SC-003 is covered by the T030 holiday unit test; the scheduled run on 2026-11-27 can confirm it on Azure.
 
 **Checkpoint**: repeated starts and holidays are free; US1 and US2 together are the complete daily
 run.
@@ -362,12 +363,13 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
 
 ### Implementation for User Story 3
 
-- [ ] T034 [US3] In `infra/modules/env.bicep`, add action group `ag-maa-owner`: short name `maa`, one email receiver from `alertEmail`, `useCommonAlertSchema: true`.
-- [ ] T035 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-execution-failed` (research R9):
+- [X] T034 [US3] In `infra/modules/env.bicep`, add action group `ag-maa-owner`: short name `maa`, one email receiver from `alertEmail`, `useCommonAlertSchema: true`.
+- [X] T035 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-execution-failed` (research R9):
   - Scope `log-maa`; `evaluationFrequency: 'PT5M'`; `windowSize: 'PT10M'`; severity 2; action `ag-maa-owner`; `autoMitigate: false`.
   - Query: `ContainerAppSystemLogs_CL | where JobName_s == 'job-maa-detect' | where Reason_s has_any (dynamic(['Failed','BackOff','Error','Timeout','DeadlineExceeded'])) or Log_s has_any (dynamic(['failed','timed out','deadline'])) | project TimeGenerated, ExecutionName_s, Reason_s, Log_s`, with the condition count > 0.
   - Add a Bicep comment that the reason strings are provisional until check Q4 (T039) pins them.
-- [ ] T036 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-no-completed-run` (research R9):
+  - *Done 2026-11-14 (T034–T036, not built or deployed yet: no `az` in the agent container):* API versions `actionGroups@2023-01-01` and `scheduledQueryRules@2026-03-01` (newest GA in the template reference). Both rules are `kind: 'LogAlert'` with `timeAggregation: 'Count'`, `operator: 'GreaterThan'`, `threshold: 0` and `skipQueryValidation: true` (a recreated workspace has no `_CL` tables yet). The action group's address is the `alertEmail` deploy input only.
+- [X] T036 [US3] In `infra/modules/env.bicep`, add scheduled query rule `alert-maa-no-completed-run` (research R9):
   - Scope `log-maa`; `evaluationFrequency: 'PT1H'`; `windowSize: 'PT2H'`; severity 2; action `ag-maa-owner`.
   - The query returns one row only when all of these hold:
     - `dayofweek(now())` is Tuesday to Saturday (2d to 6d);
@@ -375,6 +377,10 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
     - `ContainerAppConsoleLogs_CL | where ContainerJobName_s == 'job-maa-detect' and TimeGenerated >= startofday(now()) + 11h and Log_s has 'status=completed'` returns no rows.
 
     Write it as `let completed = toscalar(…| count); print fire = …| where fire`. Add a comment that the column name `ContainerJobName_s` is confirmed in Q4.
+  - *Pinned 2026-11-16 (T035) from check Q4:* the query is now `ContainerAppSystemLogs_CL | where JobName_s == 'job-maa-detect' and Reason_s in ('BackoffLimitExceeded', 'DeadlineExceeded') | summarize arg_max(TimeGenerated, Reason_s, Log_s) by ExecutionName_s`, so one failed execution gives one row instead of one per attempt (`Error`). `muteActionsDuration: 'PT1H'` with `autoMitigate: false` stops the overlapping 5-minute/10-minute evaluation from sending a duplicate email, which Q4 observed. The provisional comments are gone from both rules.
+  - *Verified 2026-11-16 (T035):* after the redeploy, Azure accepted `muteActionsDuration: 'PT1H'` with `autoMitigate: false`; a deliberate failing start at 21:22 UTC sent exactly one email.
+  - *Changed 2026-11-14:* `windowSize` is `PT3H`, not `PT2H`: the window also filters the tables, so an evaluation at 13:45 with `PT2H` would miss a `status=completed` line from 11:14 and alert falsely. The match is `Log_s contains 'status=completed'` instead of `has`, which matches whole terms (`=` is a separator). Recorded in research R9.
+  - *Verified 2026-11-17 (T036):* the scheduled run succeeded in about 13 minutes and `alert-maa-no-completed-run` sent no email.
 - [X] T037 [US3] (owner, host) Run check Q3 from quickstart.md §3: create a temporary job copy in `rg-maa-env` with `replicaTimeout 120`, `replicaRetryLimit 2` and image `docker.io/library/busybox:1.37` running `sh -c 'sleep 50; exit 1'`. Start it once, count the replicas, and delete it.
   - 3 replicas: set `jobReplicaTimeoutSeconds = 1800` in `infra/main.bicepparam` and redeploy.
   - 2 replicas: keep 3600.
@@ -382,11 +388,14 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
   Record the observed behaviour and the final value in `specs/002-azure-daily-run/research.md` R1.
 
   *Done 2026-11-13:* 2 replicas ran, started 11 s and 79 s after the execution start; the second was cut off at 120 s and no third started. The timer is per execution, so `replicaTimeout` stays `3600` (research R1). `az containerapp job create` rejected `--args "-c" …` with "unrecognized arguments", because a value starting with `-` is parsed as an option, so the copy was created with `--yaml` from a file outside the repository (quickstart.md §3, "Q3 job copy").
-- [ ] T038 [US3] (owner, host) Redeploy with `infra/scripts/deploy.sh` so the alerts from T034–T036 exist (empty key input keeps the secret).
-- [ ] T039 [US3] Run check Q4 from quickstart.md §3, in two parts:
+- [X] T038 [US3] (owner, host) Redeploy with `infra/scripts/deploy.sh` so the alerts from T034–T036 exist (empty key input keeps the secret).
+  *Done 2026-11-14:* deployed; the action group's confirmation email and the Q4 alert email both arrived.
+- [X] T039 [US3] Run check Q4 from quickstart.md §3, in two parts:
   - (owner, host) Start the job once with failing args (`--date 2026-11-08`, a Sunday, exit 2 on every attempt). Confirm a failure email within 15 minutes. Then query `log-maa` and copy the real `Reason_s` values and column names of the failed attempts and execution.
   - (agent, from the owner's notes) Pin those values in the queries of `infra/modules/env.bicep` (T035 and T036), and record them in research R9.
   - *Note 2026-11-14, open:* the quickstart.md Q4 command `az containerapp job start … --args "--date" "2026-11-08"` will likely fail with "unrecognized arguments", as `--args "-c" …` did in Q3 (T037), because the Azure CLI parses a value that starts with `-` as its own option. Check `az containerapp job start --help` on the host and decide the override method (for example `--yaml`, or `--args=…`) before running Q4; fix the Q4 row then.
+  - *Updated 2026-11-14:* quickstart.md §3 now has a "Q4 failing start" block using `--args=--date=2026-11-08` with `--image`, `--container-name`, `--cpu` and `--memory` given explicitly, plus a `--yaml` fallback. It is unverified until checked with `--help` on the host.
+  - *Done 2026-11-14/16:* the `--args=` form worked (no "unrecognized arguments"); 3 failed attempts; first email about 8 minutes after the start, plus one duplicate. Columns `JobName_s` and `ContainerJobName_s` confirmed; reasons `Error` (per attempt), `BackoffLimitExceeded` and, from Q3, `DeadlineExceeded` (per execution). Pinned in `infra/modules/env.bicep` (see T035) and recorded in research R9 and quickstart.md Q4. `Microsoft.Insights` was `NotRegistered` and was registered by hand on 2026-11-14; `infra/scripts/preflight.sh` now checks the providers the templates use (Microsoft.App, Microsoft.Consumption, Microsoft.DBforPostgreSQL, Microsoft.Insights, Microsoft.KeyVault, Microsoft.ManagedIdentity, Microsoft.OperationalInsights) and prints `az provider register -n <namespace> --wait` for each missing one. Redeployed with the pinned rule; retest 2026-11-16: a deliberate failing start at 21:22 UTC sent exactly one email (research R9, quickstart.md Q4).
 - [ ] T040 [US3] (owner, host) Validate quickstart.md §4 row US3/SC-008: set an invalid value with `az keyvault secret set`, start once, and confirm ≤ 3 attempts, nothing stored and a failure email. Then restore the real key.
 
 **Checkpoint**: failures are bounded, stopped in time and reported.

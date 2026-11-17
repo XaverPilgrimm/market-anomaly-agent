@@ -123,8 +123,33 @@ settings on GitHub). Without that step, the job cannot pull the image.
 | # | Check | How | Pass condition |
 |---|---|---|---|
 | Q3 | Timeout scope (research R1) | Start one execution of a temporary copy of the job with `replicaTimeout 120`, `replicaRetryLimit 2`, command `sh -c 'sleep 50; exit 1'`, image `docker.io/library/busybox:1.37`, in `rg-maa-env`. Create the copy with `az containerapp job create --yaml` from a file outside the repository (see "Q3 job copy" below), not with `--command`/`--args`. Count the replicas in `az containerapp job execution show`. Delete the copy afterwards. | **3 replicas** ⇒ the timer is per attempt: set `replicaTimeout` to `1800`. **2 replicas** (the third cut off at 120 s) ⇒ the timer is per execution: keep `3600`. Record the result in research R1. *Result 2026-11-13: 2 replicas (started 11 s and 79 s after the execution start; the second cut off at 120 s; no third). Per execution: `3600` stays (research R1).* |
-| Q4 | Failure alert fires | Start one execution with an overridden argument that fails fast: `az containerapp job start … --args "--date" "2026-11-08"` (a Sunday, so exit 2) | Within 15 minutes an email arrives from `alert-maa-execution-failed`. Read the actual `Reason_s` and columns in `log-maa`, and pin them in the rule (research R9). |
+| Q4 | Failure alert fires | After the US3 redeploy (tasks.md T038), start one execution of `job-maa-detect` with an overridden argument that fails fast: `--date=2026-11-08`, a Sunday, so every attempt exits 2 before touching the database or the vendor. Use the commands under "Q4 failing start" below, not `--args "--date" …`. | Within 15 minutes an email arrives from `alert-maa-execution-failed`. Read the actual `Reason_s` and columns in `log-maa`, and pin them in the rule (research R9). *Result 2026-11-14: the `--args=` form worked; the execution failed after 3 attempts, each with the non-trading-day error. The first "Fired" email arrived about 8 minutes after the start (passed); a duplicate followed 5 minutes later from the overlapping window. Columns `JobName_s` and `ContainerJobName_s` confirmed; reasons `Error` per attempt and `BackoffLimitExceeded` per execution (`DeadlineExceeded` for the Q3 timeout). The rule now matches the execution-level reasons only, one row per execution, with actions muted for 1 hour (research R9). Retest 2026-11-16 after the redeploy: a deliberate failing start at 21:22 UTC sent exactly one email. The scheduled run on 2026-11-17 succeeded in about 13 minutes and `alert-maa-no-completed-run` sent no email.* |
 | Q5 | Pipeline least privilege | First `push` to `main` after deployment | `publish-deploy` succeeds with the custom role only. If it fails with an authorization error, add exactly the missing action and record it in research R7. The likeliest one is `Microsoft.App/managedEnvironments/join/action`: updating a job can require it on the environment `cae-maa`. If so, grant it on the environment's scope only (a second, narrow custom role or an extra assignment), not by widening the role on the job. *Result 2026-11-13: passed with the custom role only; `managedEnvironments/join/action` was not needed (research R7).* |
+
+**Q4 failing start.** `--args "--date" "2026-11-08"` would be rejected like Q3's `--args "-c" …`
+("unrecognized arguments"). Writing the option with `=` passes the whole value as one argument, so
+the CLI does not read it as an option of its own, and `detect` accepts `--date=2026-11-08`. The
+override most likely replaces the container definition rather than merging into it, so the image,
+container name, CPU and memory are given explicitly; the job's environment variables may be
+missing in that attempt, which does not matter because the date check fails first. Check
+`az containerapp job start --help` on the host before running it. If `--args=…` is rejected too,
+use `--yaml` with a template file kept outside the repository, as in Q3.
+
+```bash
+image=$(az containerapp job show -n job-maa-detect -g rg-maa-env \
+  --query "properties.template.containers[0].image" -o tsv)
+az containerapp job start -n job-maa-detect -g rg-maa-env \
+  --image "$image" --container-name detect --cpu 0.5 --memory 1.0Gi \
+  --args=--date=2026-11-08
+az containerapp job execution list -n job-maa-detect -g rg-maa-env -o table
+```
+
+Then, in `log-maa` (portal, Logs), read the failed attempts' rows and columns:
+`ContainerAppSystemLogs_CL | where TimeGenerated > ago(1h) | take 50` and
+`ContainerAppConsoleLogs_CL | where TimeGenerated > ago(1h) | take 50`.
+Note the column holding the job name in each table and every `Reason_s` value of the failed
+attempts and the execution. Do not copy execution names, IDs or the alert address into the
+repository.
 
 **Q3 job copy.** `az containerapp job create … --args "-c" "sleep 50; exit 1"` is rejected with
 "unrecognized arguments": the CLI parses a value that starts with `-` as an option of its own. So
@@ -170,11 +195,11 @@ rm ~/maa-q3.yaml
 | Spec | Scenario | How | Expected |
 |---|---|---|---|
 | US1-1, US1-2 | First execution fills an empty database | `az containerapp job start -n job-maa-detect -g rg-maa-env` | Execution `Succeeded` in ~13 min. Logs show `start mode=latest evaluated_date=<prev trading day> version=<sha>`, the applied migration `0001_init.sql`, and the last line `… status=completed …`. The owner query (contract §6) shows that day in `detection_runs`. |
-| US2, SC-002 | Repeated start is free | Start again straight away | `Succeeded` in < 2 min. Log says "already stored". The Twelve Data dashboard shows 0 new credits. Row counts unchanged. |
-| US2 / SC-003 | Holiday | The morning after a market holiday (or a unit test with an injected clock) | Resolves to the trading day before the holiday: already stored, exit 0, no exit 3 |
+| US2, SC-002 | Repeated start is free | Start again straight away | `Succeeded` in < 2 min. Log says "already stored". The Twelve Data dashboard shows 0 new credits. Row counts unchanged. *Result 2026-11-14 (image 3e756e8f): a manual start at 13:36 UTC succeeded in 39 s. The log shows `start mode=latest` for the previous trading day, `applied migration(s): none`, `<day> already stored; nothing fetched` and the stored summary, with no `fetched` lines. Twelve Data credits were the same before and after (0 new). The owner query (deployment-contract.md §6) after the start shows the `detection_runs` row count unchanged and its latest `computed_at` still from the 11:00 UTC scheduled run, so nothing was written.* |
+| US2 / SC-003 | Holiday | The morning after a market holiday (or a unit test with an injected clock) | Resolves to the trading day before the holiday: already stored, exit 0, no exit 3 *Covered by the T030 unit test (Fri 2026-11-27 resolves to Wed 2026-11-25). Azure confirmation possible with the scheduled run on 2026-11-27, after Thanksgiving.* |
 | US1-3, US1-5, SC-010 | Pipeline | Open a pull request: checks run, `publish-deploy` is skipped, no Azure login in the log. Merge: a new `:<sha>` tag appears and the job shows that image. | As described |
 | US1-4 | Failing checks block delivery | Open a pull request with a deliberate `ruff` violation and confirm `checks` fails. Read `ci.yml` to confirm `publish-deploy` has `needs: checks` (so a failing push to `main` cannot reach it). Close the pull request unmerged. | `checks` red, `publish-deploy` not run, no new tag, job image unchanged |
-| US3, SC-008 | Bounded retries | Temporarily set the vault secret to an invalid key and start once. Restore the key afterwards. | ≤ 3 attempts, about 303 vendor requests at most, nothing stored, failure email |
+| US3, SC-008 | Bounded retries | Temporarily set the vault secret to an invalid key: `vault=$(az keyvault list -g rg-maa-env --query "[0].name" -o tsv)`, then `az keyvault secret set --vault-name "$vault" --name twelve-data-api-key --value invalid-sc008 --output none`. The job picks up a new secret version only after a delay (Container Apps refreshes Key Vault references periodically, up to about 30 minutes), so wait before `az containerapp job start -n job-maa-detect -g rg-maa-env`, and check the log shows an authentication error, not a normal fetch. Restore the real key afterwards with `deploy.sh` (type it at the key prompt) and wait again before the next scheduled run. | ≤ 3 attempts, about 303 vendor requests at most, nothing stored, failure email |
 | US4-2, FR-026 | Idempotent deploy | `deploy.sh` again, no changes | What-if shows no changes (except a rule left open) |
 | US4-3/4, SC-005 | Teardown and rebuild | `teardown.sh`, then at once `deploy.sh` and `gh workflow run ci.yml --ref main` | Redeploy succeeds; no bootstrap needed (identity kept); the next execution says "already stored" for the last day; all earlier days are still present |
 | US4-5, FR-030 | Lock | `az group delete -n rg-maa-data` | Refused by the lock |

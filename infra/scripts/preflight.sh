@@ -26,6 +26,21 @@ fi
 echo "subscription: $(az account show --query name -o tsv)"
 echo "region:       $region"
 
+# Resource providers the templates use. A new subscription may have some NotRegistered
+# (Microsoft.Insights was, on 2026-11-14), and the deployment then fails on the first resource of
+# that namespace. Registration is per subscription, not per region.
+unregistered=()
+for ns in Microsoft.App Microsoft.Consumption Microsoft.DBforPostgreSQL Microsoft.Insights \
+    Microsoft.KeyVault Microsoft.ManagedIdentity Microsoft.OperationalInsights; do
+    state="$(az provider show -n "$ns" --query registrationState -o tsv)"
+    if [[ $state == Registered ]]; then
+        echo "PASS  resource provider $ns registered"
+    else
+        echo "FAIL  resource provider $ns is ${state:-unknown}"
+        unregistered+=("$ns")
+    fi
+done
+
 failed=0
 check() {
     local label=$1 ok=$2
@@ -57,9 +72,18 @@ jobs="$(az provider show -n Microsoft.App --query "resourceTypes[?resourceType==
 has_jobs="$(jq -r --arg d "$display" 'index($d) != null' <<<"$jobs" 2>/dev/null || echo false)"
 check "Container Apps jobs available in $display" "$has_jobs"
 
+if ((${#unregistered[@]})); then
+    echo
+    echo "Register the missing provider(s) once for this subscription, then run this again:"
+    for ns in "${unregistered[@]}"; do
+        echo "  az provider register -n $ns --wait"
+    done
+fi
 if ((failed)); then
     echo
     echo "Region $region does not pass. Try the fallback italynorth (research R2)."
+fi
+if ((failed || ${#unregistered[@]})); then
     exit 1
 fi
 echo
