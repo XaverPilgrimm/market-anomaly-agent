@@ -326,6 +326,15 @@ instead of an app registration, so everything stays in Bicep without Microsoft G
   `githubRepositoryId`. The IDs never change, even if the repository or owner is renamed; the names
   in the subject would then need a redeploy.
 
+**Branch restriction, as validated** (SC-007, recorded 2026-11-18): the planned test, a
+`workflow_dispatch` on another branch expected to fail with `AADSTS70021`, cannot work as
+written: `publish-deploy` runs only for `refs/heads/main`, so on another branch it is skipped and
+no token is ever requested. The restriction is shown instead by the credential's subject, which
+ends with `:ref:refs/heads/main`, and by Entra's live refusal of a non-matching subject
+(`AADSTS700213` on 2026-11-13, above). A token for any other ref carries a different subject and
+is refused the same way. The gate in the workflow and the subject in the credential are two
+independent layers.
+
 **Sign-in values as secrets, gated by a variable** (recorded 2026-11-13):
 
 - **Problem:** the same `azure/login` run printed `client-id`, `tenant-id` and `subscription-id` in

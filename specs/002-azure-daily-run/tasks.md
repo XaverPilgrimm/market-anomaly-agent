@@ -482,11 +482,13 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
 - [X] T050 [P] Update the "Getting started" section of `README.md` so it lists both modes (`uv run detect --date …` and `uv run detect --latest`, optionally with `--migrate`) and links the 002 CLI contract next to the 001 one.
 - [X] T051 [P] In `specs/001-nasdaq100-anomaly-detection/quickstart.md`, add one note under its run instructions that `--migrate` can replace the separate `python -m market_anomaly_agent.storage.migrate` step. Change nothing else in feature 001's documents.
-- [ ] T052 (owner, host) Validate SC-007 from quickstart.md §4:
+- [X] T052 (owner, host) Validate SC-007 from quickstart.md §4:
   - `podman image inspect` and an `env` listing of the image show no key.
   - A search of the Actions logs and `log-maa` for the key finds nothing.
   - A password login with `psql` is refused.
   - `workflow_dispatch` on a non-`main` branch fails at `azure/login` with `AADSTS70021`.
+
+  *Done 2026-11-18:* a search for the first 6 characters of the key (never printed) found 0 hits in `podman image inspect`, in `env` and `ls -la /app` inside the image, in the logs of the last 10 Actions runs and in `log-maa`. The server's `authConfig` has `activeDirectoryAuth` Enabled and `passwordAuth` Disabled. A `psql` login as `maa-db-admins` with a plain password was refused with `FATAL: The access token has invalid format …`. The branch test was replaced: `publish-deploy` is gated on `main`, so a dispatch on another branch skips it and cannot produce `AADSTS70021`; the evidence is the credential subject ending in `:ref:refs/heads/main` and the live `AADSTS700213` refusal of a non-matching subject on 2026-11-13 (research R7, quickstart.md §4 SC-007 rows).
 - [ ] T053 (owner, host) Run quickstart.md §6 (the local workflow is unchanged), then let the schedule run for a week to confirm SC-001 (5 trading days stored with no manual action).
 - [X] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
   - No secret in any committed file (`git grep -nE 'td-|PASSWORD=|AccountKey'` reviewed by hand).
