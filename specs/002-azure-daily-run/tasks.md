@@ -462,7 +462,7 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
   The amount is in the billing currency, EUR (constitution v1.2.0).
 
-  *Done 2026-11-18, not built or deployed yet:* API version `Microsoft.Consumption/budgets@2024-08-01`. The REST reference lists `2026-06-01` as the newest version, but the Bicep template reference could not be read, so the long-established `2024-08-01` is used; switch to `2026-06-01` if `az bicep build` knows its types without warning BCP081. No `endDate` (the service defaults it to 10 years). Open risk for later redeploys: the REST reference says a "past start date should be selected within the timegrain period", so a redeploy in a later month with `budgetStartDate = '2026-11-01'` may be rejected; if the what-if or deployment does, record the error here and decide then (for example keep the start date only on creation).
+  *Done 2026-11-18, not built or deployed yet:* API version `Microsoft.Consumption/budgets@2024-08-01`. The REST reference lists `2026-06-01` as the newest version, but the Bicep template reference could not be read, so the long-established `2024-08-01` is used; `2024-08-01` was accepted on deployment and is kept (T049). No `endDate` (the service defaults it to 10 years). Open risk for later redeploys: the REST reference says a "past start date should be selected within the timegrain period", so a redeploy in a later month with `budgetStartDate = '2026-11-01'` may be rejected; if the what-if or deployment does, record the error here and decide then (for example keep the start date only on creation).
 - [X] T048 [P] [US5] Add an "Azure daily run" section to `README.md`:
   - What runs where and when (Tuesday to Saturday, 11:00 UTC).
   - The deploy, operate, teardown and decommission entry points, with links to `specs/002-azure-daily-run/quickstart.md` and `contracts/deployment-contract.md`.
@@ -471,7 +471,8 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
   - The note that every `az` and deployment command runs on the host only.
 
   *Done 2026-11-18:* the cost table uses the check Q2 result (PostgreSQL about EUR 16.30) plus the estimated EUR 1.79 for the two alert rules, so the total reads "about 18" rather than the earlier "about 19" estimate. The table of entry points includes `preflight.sh`, `teardown.sh`, `decommission.sh` and `restore.sh`.
-- [ ] T049 [US5] (owner, host) Validate quickstart.md §4 row US5/FR-028: `az consumption budget show --budget-name budget-maa-monthly` shows EUR 30 with the three actual-cost notifications.
+- [X] T049 [US5] (owner, host) Validate quickstart.md §4 row US5/FR-028: `az consumption budget show --budget-name budget-maa-monthly` shows EUR 30 with the three actual-cost notifications.
+  *Done 2026-11-18:* the what-if showed the budget as the only Create; API version `2024-08-01` was accepted and is kept; `az consumption budget show` returned amount 30.0, Monthly, start 2026-11-01 and thresholds 50/80/100.
 
 **Checkpoint**: all five stories delivered.
 
@@ -479,19 +480,27 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T050 [P] Update the "Getting started" section of `README.md` so it lists both modes (`uv run detect --date …` and `uv run detect --latest`, optionally with `--migrate`) and links the 002 CLI contract next to the 001 one.
-- [ ] T051 [P] In `specs/001-nasdaq100-anomaly-detection/quickstart.md`, add one note under its run instructions that `--migrate` can replace the separate `python -m market_anomaly_agent.storage.migrate` step. Change nothing else in feature 001's documents.
+- [X] T050 [P] Update the "Getting started" section of `README.md` so it lists both modes (`uv run detect --date …` and `uv run detect --latest`, optionally with `--migrate`) and links the 002 CLI contract next to the 001 one.
+- [X] T051 [P] In `specs/001-nasdaq100-anomaly-detection/quickstart.md`, add one note under its run instructions that `--migrate` can replace the separate `python -m market_anomaly_agent.storage.migrate` step. Change nothing else in feature 001's documents.
 - [ ] T052 (owner, host) Validate SC-007 from quickstart.md §4:
   - `podman image inspect` and an `env` listing of the image show no key.
   - A search of the Actions logs and `log-maa` for the key finds nothing.
   - A password login with `psql` is refused.
   - `workflow_dispatch` on a non-`main` branch fails at `azure/login` with `AADSTS70021`.
 - [ ] T053 (owner, host) Run quickstart.md §6 (the local workflow is unchanged), then let the schedule run for a week to confirm SC-001 (5 trading days stored with no manual action).
-- [ ] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
+- [X] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
   - No secret in any committed file (`git grep -nE 'td-|PASSWORD=|AccountKey'` reviewed by hand).
   - No personal or tenant identifier in any file (research R16): `git grep -nE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'` may only find Microsoft's documented built-in role definition IDs; `git grep -niE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|onmicrosoft\.com'` finds no email address of the owner and no tenant domain. Known, allowed hits: `noreply@` attribution lines, the vendor's public contact address in feature 001's research.md, and the fake `user:password@host` connection strings in tests and examples.
   - Type hints on every new function.
   - Every new test passed only after being seen failing.
+
+  *Done 2026-11-18, over the branch diff against `main`:*
+  - Secrets: the hits are the empty `POSTGRES_PASSWORD=` placeholder in `.env.example`, the token read into `PGPASSWORD` at run time (`_common.sh`, quickstart.md), task text and the fake `td-SECRET-api-key-0042` in `tests/unit/test_cli.py`. No real secret.
+  - Identifiers: the only GUIDs are Microsoft's built-in Key Vault Secrets User and Secrets Officer role definition IDs (`env.bicep`, task T019). Long numbers are Microsoft Q&A links and a `ca-certificates` package version; no numeric GitHub ID. Email search: the vendor's public address in 001 research.md and fake `user@host` connection strings in tests and examples; no owner address and no tenant domain.
+  - Type hints: `mypy --strict` over `src` and `tests` reports no issues (44 files), so every function is annotated.
+  - Test-first: the US2 tests (T030, T031) and the computed_at tests (T055) were committed red and seen failing for the expected reason before the code; the US1 tests (T009 to T011) were written under "write first, see them fail", but neither tasks.md nor the git history records their red run (no separate red commit), so that part cannot be confirmed from the record. US3 to US5 added no Python.
+  - Checks at this pass: ruff and ruff format clean; 163 unit tests pass. Integration suite rerun on 2026-11-18 against the local PostgreSQL: 37 passed.
+  - Deviations with a complexity cost are recorded in plan.md, Complexity Tracking (teardown time-window guard, `pg_client` directory mount).
 - [X] T055 *Added after the first deployment (2026-11-13):* make `computed_at` the time the computation is performed (feature 001 FR-014), fixing the code, not the spec. The first Azure run stored `computed_at` 09:05:03 UTC for a run that started at 09:04:29 and fetched until about 09:18: `cli.py` passed `datetime.now(UTC)`, taken once before the fetch, and `run_detection` stored it as `computed_at`, while `save_run` reused it as every bar's `fetched_at`.
   - Tests first (committed red): `test_fetch_start_and_computation_instants_come_from_the_injected_clock` (unit; a fake clock moved forward one minute per fetch, read exactly twice), `test_the_injected_clock_is_passed_to_run_detection` (unit, CLI) and `test_bars_store_the_fetch_start_and_the_run_the_computation_instant` (integration).
   - `run_detection(evaluated_date, tickers, source, clock)` now takes the injected clock (`Callable[[], datetime]`) and reads it twice: `fetched_at` right before the first fetch, and `computed_at` after every bar has been fetched, right before the computation. To make that possible, all bars are fetched first and evaluated afterwards; the "skipped …" log lines for gaps and short history therefore now follow all "fetched …" lines. The benchmark is still checked straight after its fetch, so an unusable benchmark still aborts before any other request.

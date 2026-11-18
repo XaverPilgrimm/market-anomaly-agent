@@ -566,7 +566,7 @@ This replaces the third-party PostgreSQL figures above (EUR 17.09 for compute an
 for France Central. With the alert rules at the estimated EUR 1.79 the total would be about
 EUR 18.09 (60% of the cap), still below EUR 24.
 
-*Budget implemented 2026-11-18 (tasks.md T047):* `Microsoft.Consumption/budgets@2024-08-01` at subscription scope, `budget-maa-monthly`, EUR 30, notifications `actual50`, `actual80` and `actual100` (`GreaterThanOrEqualTo`, `Actual`) to the deployment-time address. It is outside both resource groups, so a teardown keeps it.
+*Budget implemented 2026-11-18 (tasks.md T047):* `Microsoft.Consumption/budgets@2024-08-01` at subscription scope, `budget-maa-monthly`, EUR 30, notifications `actual50`, `actual80` and `actual100` (`GreaterThanOrEqualTo`, `Actual`) to the deployment-time address. It is outside both resource groups, so a teardown keeps it. *Deployed 2026-11-18:* the what-if showed it as the only Create, Azure accepted API version `2024-08-01` (kept), and `az consumption budget show` returned amount 30.0, Monthly, start 2026-11-01 and thresholds 50/80/100 (tasks.md T049).
 
 **Watch items**: Microsoft Defender for Cloud plans must stay off (they bill per resource). A
 General Purpose SKU, high availability or geo-redundant backup would each break the cap and are

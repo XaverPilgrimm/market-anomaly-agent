@@ -27,9 +27,21 @@ uv run detect --date 2026-11-10
 
 Setup, configuration and the validation scenarios are in
 [`specs/001-nasdaq100-anomaly-detection/quickstart.md`](specs/001-nasdaq100-anomaly-detection/quickstart.md).
-The CLI's arguments, output and exit codes are in
-[`contracts/cli-contract.md`](specs/001-nasdaq100-anomaly-detection/contracts/cli-contract.md),
-and the full specification is in [`spec.md`](specs/001-nasdaq100-anomaly-detection/spec.md).
+The CLI has two modes:
+
+```bash
+uv run detect --date 2026-11-10    # evaluate the given trading day
+uv run detect --latest             # evaluate the most recent completed trading day (New York time);
+                                   # exits 0 without fetching if that day is already stored
+uv run detect --latest --migrate   # apply pending database migrations first (either mode)
+```
+
+The arguments, output and exit codes are in the CLI contracts of
+[feature 001](specs/001-nasdaq100-anomaly-detection/contracts/cli-contract.md) and
+[feature 002](specs/002-azure-daily-run/contracts/cli-contract.md), which adds `--latest` and
+`--migrate`. The full specifications are in
+[001 `spec.md`](specs/001-nasdaq100-anomaly-detection/spec.md) and
+[002 `spec.md`](specs/002-azure-daily-run/spec.md).
 
 ## Azure daily run
 

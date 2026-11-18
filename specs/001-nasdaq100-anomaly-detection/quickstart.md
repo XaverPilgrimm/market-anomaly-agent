@@ -34,6 +34,10 @@ export PRICE_DATA_API_KEY="<your Twelve Data API key>"
 uv run python -m market_anomaly_agent.storage.migrate   # applies storage/migrations/*.sql in order
 ```
 
+> *Note (feature 002):* `uv run detect … --migrate` applies the same pending migrations before
+> detecting, so it can replace the separate `storage.migrate` step
+> ([002 CLI contract](../002-azure-daily-run/contracts/cli-contract.md)).
+
 ## Validation scenario 1 — a known historical day, hand-checked
 
 1. Pick a past trading day with publicly known, unusual single-stock moves (e.g., a day with a

@@ -205,7 +205,7 @@ rm ~/maa-q3.yaml
 | US4-5, FR-030 | Lock | `az group delete -n rg-maa-data` | Refused by the lock *Result 2026-11-18: refused with `ScopeLocked`. Passed.* |
 | SC-007 | No secret leaks | `podman image inspect` and `podman run --rm --entrypoint sh <image> -c 'env; ls -la /app'` show no key. Search the Actions logs and `log-maa` for the first 6 characters of the key: 0 hits. A password login attempt with `psql` → `password authentication failed` or `not permitted`. | As described |
 | SC-007 | Branch-restricted OIDC | Run the workflow on a branch with `workflow_dispatch` | `azure/login` fails with `AADSTS70021` (no matching federated credential) |
-| US5, FR-028 | Budget | `az consumption budget show --budget-name budget-maa-monthly` | EUR 30; notifications at 50/80/100% (EUR 15 / 24 / 30) on actual cost |
+| US5, FR-028 | Budget | `az consumption budget show --budget-name budget-maa-monthly` | EUR 30; notifications at 50/80/100% (EUR 15 / 24 / 30) on actual cost *Result 2026-11-18: the `deploy.sh` what-if showed `budget-maa-monthly` as the only Create (amount 30, Monthly, start 2026-11-01, actual-cost notifications at 50/80/100) plus the known noise (US4-2); API version 2024-08-01 was accepted. After the deployment, `az consumption budget show` returned amount 30.0, Monthly, start 2026-11-01 and thresholds 50/80/100. Passed.* |
 | SC-001 | Five days unattended | Leave it running for a week | 5 trading days stored, no manual action |
 
 **Teardown and rebuild.** `teardown.sh` deletes `rg-maa-env` (logs, environment, job, vault,
