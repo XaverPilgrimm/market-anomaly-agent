@@ -31,6 +31,52 @@ The CLI's arguments, output and exit codes are in
 [`contracts/cli-contract.md`](specs/001-nasdaq100-anomaly-detection/contracts/cli-contract.md),
 and the full specification is in [`spec.md`](specs/001-nasdaq100-anomaly-detection/spec.md).
 
+## Azure daily run
+
+Feature 002 runs the detection unattended on Azure, in France Central:
+
+- **When:** an Azure Container Apps scheduled job starts at **11:00 UTC, Tuesday to Saturday**,
+  after every US close and before every US open. It runs `detect --latest --migrate`, which
+  evaluates the most recent completed NASDAQ trading day. If that day is already stored (a
+  repeated start, or the morning after a holiday) it exits without fetching or writing anything.
+- **Where:** the image comes from GitHub Container Registry and is published by GitHub Actions on
+  every merge to `main`, which signs in to Azure with OIDC. Results go to Azure Database for
+  PostgreSQL (Burstable B1ms, PostgreSQL 17) in its own locked resource group. The Twelve Data key
+  is in Key Vault. Logs go to Log Analytics, and a failed run or a missing run sends an email.
+- **Retries:** at most 3 attempts per start, within a one-hour limit.
+
+Entry points, all in `infra/scripts/`, with the procedures in
+[`specs/002-azure-daily-run/quickstart.md`](specs/002-azure-daily-run/quickstart.md) and the
+guarantees in
+[`contracts/deployment-contract.md`](specs/002-azure-daily-run/contracts/deployment-contract.md):
+
+| Task | Script |
+|---|---|
+| Check a region and the subscription | `preflight.sh <region>` |
+| Deploy or converge (always behind a what-if) | `deploy.sh` |
+| Create the database role and grants (new server only) | `db-access.sh open`, `db-bootstrap.sh`, `db-access.sh close` |
+| Query the database as the owner | `db-access.sh open`, then the owner query in the contract, then `db-access.sh close` |
+| Delete and rebuild the environment (the database stays) | `teardown.sh`, then `deploy.sh` |
+| Export, then delete everything | `decommission.sh <dump path outside the repository>` |
+| Bring an export back | `deploy.sh`, `db-bootstrap.sh`, `restore.sh <dump path>` |
+
+**Every `az`, `gh`, `podman` and deployment command runs on the owner's host only**, never inside a
+container or in the agent's environment. The repository is public, so the scripts read tenant,
+subscription and object IDs, the alert address and the key at run time and never write them to a
+file.
+
+**Cost.** The cap is EUR 30 per month, enforced as an Azure budget that emails at 50%, 80% and
+100% of the actual cost. Azure budgets only send notifications; they do not stop spending.
+Estimate for France Central (research R10, check Q2):
+
+| Item | EUR / month |
+|---|---|
+| PostgreSQL Flexible Server, Burstable B1ms, 730 h, 32 GiB storage | about 16.30 |
+| Two log alert rules (estimate) | about 1.79 |
+| Container Apps job and environment, Log Analytics, Key Vault | within the free grants, or a few cents |
+| Container registry (GitHub Container Registry, public package) | 0 |
+| **Total** | **about 18**, against the EUR 30 cap |
+
 ## Known limitations
 
 - **The benchmark contains the evaluated stocks.** QQQ tracks the Nasdaq-100, so every evaluated

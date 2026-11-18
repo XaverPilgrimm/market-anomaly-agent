@@ -440,6 +440,7 @@ FR-027, FR-030 to FR-032).
   - A rerun of `deploy.sh` shows a what-if with no changes.
   - `teardown.sh`, then at once `deploy.sh` and `gh workflow run ci.yml --ref main`, then a manual start, reports the last stored day as "already stored", with all earlier days present and no bootstrap needed.
   - `az group delete -n rg-maa-data` is refused by the lock.
+  - *Partly done 2026-11-18:* (1) A second `deploy.sh` what-if showed no Create and no Delete; its 7 Modify entries are noise (server-managed defaults shown as removals, `reference()` values what-if cannot evaluate, and `ssl_min_protocol_version` going from system-default to user-override at the same value). The empty key prompt skipped the secret, the image stayed current, and the owner answered N (quickstart.md §4, US4-2). (2) `az group delete -n rg-maa-data` was refused with `ScopeLocked` (US4-5). Still open: the teardown and rebuild (US4-3/4, SC-005), so T045 stays unchecked.
 - [ ] T046 [US4] (owner, host, optional; only when actually pausing) Validate quickstart.md §5 / SC-009: decommission to a path outside the repository, redeploy, bootstrap, restore, and compare the `detection_runs` counts.
 
 **Checkpoint**: the environment is disposable, and the results are not.
@@ -455,17 +456,21 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
 ### Implementation for User Story 5
 
-- [ ] T047 [US5] In `infra/main.bicep`, add `Microsoft.Consumption/budgets` `budget-maa-monthly` at subscription scope:
+- [X] T047 [US5] In `infra/main.bicep`, add `Microsoft.Consumption/budgets` `budget-maa-monthly` at subscription scope:
   - `category: 'Cost'`, `amount: budgetAmountEur`, `timeGrain: 'Monthly'`, `timePeriod { startDate: budgetStartDate }`.
   - Three notifications, `actual50`, `actual80` and `actual100`: `enabled: true`, `operator: 'GreaterThanOrEqualTo'`, `threshold` 50, 80 and 100, `thresholdType: 'Actual'`, `contactEmails: [alertEmail]`.
 
   The amount is in the billing currency, EUR (constitution v1.2.0).
-- [ ] T048 [P] [US5] Add an "Azure daily run" section to `README.md`:
+
+  *Done 2026-11-18, not built or deployed yet:* API version `Microsoft.Consumption/budgets@2024-08-01`. The REST reference lists `2026-06-01` as the newest version, but the Bicep template reference could not be read, so the long-established `2024-08-01` is used; switch to `2026-06-01` if `az bicep build` knows its types without warning BCP081. No `endDate` (the service defaults it to 10 years). Open risk for later redeploys: the REST reference says a "past start date should be selected within the timegrain period", so a redeploy in a later month with `budgetStartDate = '2026-11-01'` may be rejected; if the what-if or deployment does, record the error here and decide then (for example keep the start date only on creation).
+- [X] T048 [P] [US5] Add an "Azure daily run" section to `README.md`:
   - What runs where and when (Tuesday to Saturday, 11:00 UTC).
   - The deploy, operate, teardown and decommission entry points, with links to `specs/002-azure-daily-run/quickstart.md` and `contracts/deployment-contract.md`.
   - The cost table from research R10 in EUR (GHCR, about EUR 19 per month against the EUR 30 cap).
   - The sentence "Azure budgets only send notifications; they do not stop spending." (FR-028).
   - The note that every `az` and deployment command runs on the host only.
+
+  *Done 2026-11-18:* the cost table uses the check Q2 result (PostgreSQL about EUR 16.30) plus the estimated EUR 1.79 for the two alert rules, so the total reads "about 18" rather than the earlier "about 19" estimate. The table of entry points includes `preflight.sh`, `teardown.sh`, `decommission.sh` and `restore.sh`.
 - [ ] T049 [US5] (owner, host) Validate quickstart.md §4 row US5/FR-028: `az consumption budget show --budget-name budget-maa-monthly` shows EUR 30 with the three actual-cost notifications.
 
 **Checkpoint**: all five stories delivered.
