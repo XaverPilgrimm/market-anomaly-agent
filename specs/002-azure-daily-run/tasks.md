@@ -490,6 +490,11 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
   *Done 2026-11-18:* a search for the first 6 characters of the key (never printed) found 0 hits in `podman image inspect`, in `env` and `ls -la /app` inside the image, in the logs of the last 10 Actions runs and in `log-maa`. The server's `authConfig` has `activeDirectoryAuth` Enabled and `passwordAuth` Disabled. A `psql` login as `maa-db-admins` with a plain password was refused with `FATAL: The access token has invalid format …`. The branch test was replaced: `publish-deploy` is gated on `main`, so a dispatch on another branch skips it and cannot produce `AADSTS70021`; the evidence is the credential subject ending in `:ref:refs/heads/main` and the live `AADSTS700213` refusal of a non-matching subject on 2026-11-13 (research R7, quickstart.md §4 SC-007 rows).
 - [ ] T053 (owner, host) Run quickstart.md §6 (the local workflow is unchanged), then let the schedule run for a week to confirm SC-001 (5 trading days stored with no manual action).
+  - *Part 1, local workflow: passed, run 2026-11-18 in the agent container against the local database (quickstart.md §6). The owner accepted the exit 3 below as the designed FR-018 behaviour, so the local workflow works:*
+    - `uv run detect --date 2026-11-10 --migrate`: exit **3**. Migrations: none pending. It fetched all 101 series, then logged "rejected: 2026-11-10 was already evaluated and the price data fetched now differs from the snapshot stored by that run (FR-018); nothing written". That day was already in the local database from an earlier run, and the vendor's adjusted bars for it have changed since (most likely a later split or dividend adjustment). This is the designed FR-018 behaviour, not a regression, but the §6 command as written only exits 0 on a day that is not yet stored locally, or whose data has not changed.
+    - `uv run detect --latest`: exit 0. It resolved and stored the previous trading day; the last stdout line is the `status=completed` summary.
+    - `uv run pytest`: exit 0 (163 passed). `uv run pytest -m integration`: exit 0 (37 passed).
+  - *Part 2 (SC-001), open:* a week of unattended scheduled runs; it completes with the scheduled run on Saturday 2026-11-21.
 - [X] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
   - No secret in any committed file (`git grep -nE 'td-|PASSWORD=|AccountKey'` reviewed by hand).
   - No personal or tenant identifier in any file (research R16): `git grep -nE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'` may only find Microsoft's documented built-in role definition IDs; `git grep -niE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|onmicrosoft\.com'` finds no email address of the owner and no tenant domain. Known, allowed hits: `noreply@` attribution lines, the vendor's public contact address in feature 001's research.md, and the fake `user:password@host` connection strings in tests and examples.
@@ -588,3 +593,16 @@ Task: "T022 [US1] infra/scripts/entra-bootstrap.sh"
 - [P] tasks touch different files and depend on no incomplete task.
 - Owner tasks are the only ones that touch Azure, GitHub settings or the real database.
 - Claude Code never commits, pushes or merges. The owner reviews each change and commits.
+
+### Follow-ups for a later feature (not part of 002)
+
+Recorded 2026-11-18 from the T053 part 1 run. They have no task ID and are not required for 002.
+
+- **Say what differs when a rerun is rejected under FR-018** (feature 001). The rejection only
+  says that the fetched data differs from the stored snapshot. It should also log which tickers
+  and which bar fields differ, so the cause (for example a later split or dividend adjustment)
+  can be seen without a manual comparison.
+- **Document the price adjustment the Twelve Data requests use.** State whether the requested
+  bars are adjusted for splits only or for dividends as well, and why that choice is right for
+  market-model abnormal returns (stock and benchmark adjusted the same way, and how this
+  interacts with FR-018 when the vendor re-adjusts past bars).

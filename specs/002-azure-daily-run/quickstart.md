@@ -274,3 +274,8 @@ uv run detect --date 2026-11-10 --migrate     # password DATABASE_URL from .env,
 uv run detect --latest                         # new mode, locally
 uv run pytest && uv run pytest -m integration
 ```
+
+*Note (2026-11-18, T053):* a `--date` run on a day that is already stored locally exits 3 if the
+vendor has adjusted that day's bars since the first run (for example after a dividend or a split).
+That is the designed FR-018 rejection, and nothing is written. To see exit 0, use a date that is
+not yet stored in the local database.
