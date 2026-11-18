@@ -201,12 +201,51 @@ rm ~/maa-q3.yaml
 | US1-4 | Failing checks block delivery | Open a pull request with a deliberate `ruff` violation and confirm `checks` fails. Read `ci.yml` to confirm `publish-deploy` has `needs: checks` (so a failing push to `main` cannot reach it). Close the pull request unmerged. | `checks` red, `publish-deploy` not run, no new tag, job image unchanged |
 | US3, SC-008 | Bounded retries | Temporarily set the vault secret to an invalid key: `vault=$(az keyvault list -g rg-maa-env --query "[0].name" -o tsv)`, then `az keyvault secret set --vault-name "$vault" --name twelve-data-api-key --value invalid-sc008 --output none`. The job picks up a new secret version only after a delay (Container Apps refreshes Key Vault references periodically, up to about 30 minutes), so wait before `az containerapp job start -n job-maa-detect -g rg-maa-env`, and check the log shows an authentication error, not a normal fetch. Restore the real key afterwards with `deploy.sh` (type it at the key prompt) and wait again before the next scheduled run. | ≤ 3 attempts, about 303 vendor requests at most, nothing stored, failure email |
 | US4-2, FR-026 | Idempotent deploy | `deploy.sh` again, no changes | What-if shows no changes (except a rule left open) |
-| US4-3/4, SC-005 | Teardown and rebuild | `teardown.sh`, then at once `deploy.sh` and `gh workflow run ci.yml --ref main` | Redeploy succeeds; no bootstrap needed (identity kept); the next execution says "already stored" for the last day; all earlier days are still present |
+| US4-3/4, SC-005 | Teardown and rebuild | Follow "Teardown and rebuild" below: `teardown.sh`, then at once `deploy.sh` (enter the key again) and `gh workflow run ci.yml --ref main`, then a manual start | Redeploy succeeds; no bootstrap needed (identity kept); the next execution says "already stored" for the last day; all earlier days are still present |
 | US4-5, FR-030 | Lock | `az group delete -n rg-maa-data` | Refused by the lock |
 | SC-007 | No secret leaks | `podman image inspect` and `podman run --rm --entrypoint sh <image> -c 'env; ls -la /app'` show no key. Search the Actions logs and `log-maa` for the first 6 characters of the key: 0 hits. A password login attempt with `psql` → `password authentication failed` or `not permitted`. | As described |
 | SC-007 | Branch-restricted OIDC | Run the workflow on a branch with `workflow_dispatch` | `azure/login` fails with `AADSTS70021` (no matching federated credential) |
 | US5, FR-028 | Budget | `az consumption budget show --budget-name budget-maa-monthly` | EUR 30; notifications at 50/80/100% (EUR 15 / 24 / 30) on actual cost |
 | SC-001 | Five days unattended | Leave it running for a week | 5 trading days stored, no manual action |
+
+**Teardown and rebuild.** `teardown.sh` deletes `rg-maa-env` (logs, environment, job, vault,
+pipeline identity, action group and alerts) and purges the vault; `rg-maa-data` (server, job
+identity, lock) is never touched.
+
+*When it is safe.* The job runs at **11:00 UTC, Tuesday to Saturday**, its retries can last
+until about 12:00, and `alert-maa-no-completed-run` checks between 12:45 and 13:45 UTC that
+the day's run completed. A teardown in that span either kills a running execution or leaves the
+rebuilt, empty `log-maa` without the `status=completed` line, which sends a false "no completed
+run" email. So:
+- **Safe:** any time on Sunday or Monday (UTC); on Tuesday to Saturday, from 14:00 UTC until
+  10:30 UTC the next morning.
+- **Finish before 10:30 UTC** on a scheduled day: the rebuild is complete only once
+  `gh workflow run` has replaced the placeholder image. Otherwise the 11:00 run starts the
+  placeholder, which completes without storing anything, and the 12:45 check alerts.
+- `teardown.sh` refuses to start between 10:30 and 14:00 UTC on Tuesday to Saturday unless
+  `MAA_TEARDOWN_ANYTIME=1` is set.
+- Don't merge to `main` between teardown and rebuild: `publish-deploy` would fail, because the
+  job and the pipeline identity don't exist.
+
+*The vendor key must be entered again.* The vault is purged, so the stored Twelve Data key is
+gone for good. `deploy.sh` refuses an empty key prompt when no secret exists; have the key at
+hand (for example from `.env`) before starting.
+
+```bash
+infra/scripts/teardown.sh            # type rg-maa-env to confirm; waits for the delete and purge
+infra/scripts/deploy.sh              # enter the Twelve Data key; answer y for AZURE_CLIENT_ID
+gh workflow run ci.yml --ref main    # publish-deploy puts the current image on the new job
+az containerapp job start -n job-maa-detect -g rg-maa-env
+```
+
+- `deploy.sh` creates a new `id-maa-github` with a new client ID, so answer **y** when it offers
+  to set the repository secret `AZURE_CLIENT_ID` (the tenant and subscription secrets are
+  unchanged; answering y for them is harmless). `AZURE_DEPLOY_ENABLED` stays set.
+- The new action group sends its confirmation email again.
+- No database bootstrap: the server and `id-maa-job` are unchanged.
+- Check before the manual start that the job shows the `:<sha>` image, not the placeholder
+  (`az containerapp job show -n job-maa-detect -g rg-maa-env --query "properties.template.containers[0].image" -o tsv`).
+  The start should then log `<day> already stored; nothing fetched` for the last stored day.
 
 ## 5. Decommission and restore (only when pausing or ending the project)
 
@@ -214,8 +253,15 @@ rm ~/maa-q3.yaml
 infra/scripts/decommission.sh ~/private/maa-$(date +%F).dump   # path must be outside the repo
 # … later …
 infra/scripts/deploy.sh && infra/scripts/db-access.sh open && infra/scripts/db-bootstrap.sh
-infra/scripts/restore.sh ~/private/maa-<date>.dump && infra/scripts/db-access.sh close
+infra/scripts/restore.sh ~/private/maa-<date>.dump              # closes owner-access itself
 ```
+
+`decommission.sh` runs `teardown.sh` first, so the same time window applies (it refuses between
+10:30 and 14:00 UTC, Tuesday to Saturday). It prints the `detection_runs` count before the export;
+note it for the comparison below. As with a teardown, the vault is purged, so `deploy.sh` asks
+for the Twelve Data key again on the way back. Run the bootstrap and `restore.sh` in one sitting,
+outside the scheduled window: `restore.sh` refuses once the job has created the tables, and until
+the bootstrap has run, a scheduled execution fails and alerts instead of writing anything.
 
 Expected (SC-009): `SELECT count(*) FROM detection_runs` matches the count taken before
 decommission, and the next execution reports the last stored day as "already stored".

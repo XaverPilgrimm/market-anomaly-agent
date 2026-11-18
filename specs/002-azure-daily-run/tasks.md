@@ -413,11 +413,12 @@ FR-027, FR-030 to FR-032).
 ### Implementation for User Story 4
 
 - [X] T041 [US4] In `infra/modules/data.bicep`, add `Microsoft.Authorization/locks` `lock-maa-data` at resource-group scope (no `scope` property, so it applies to `rg-maa-data`) with `level: 'CanNotDelete'` and notes `Stored detection results; see deployment-contract.md §6 (decommission)`. It is deployed on every run, so it is in place after every deployment (FR-030). *Pulled forward into US1 (before T028):* the database holds the research record from the first run on, so the lock is part of the first deployment. The teardown, decommission and restore scripts (T042–T044) stay in US4.
-- [ ] T042 [P] [US4] Create `infra/scripts/teardown.sh` (sources `_common.sh`):
+- [X] T042 [P] [US4] Create `infra/scripts/teardown.sh` (sources `_common.sh`):
   - Print what will be deleted and require typing `rg-maa-env` to confirm.
   - `az group delete -n rg-maa-env --yes`, then purge the soft-deleted vault: `az keyvault list-deleted --query "[?name=='kv-maa-<u>']"`, then `az keyvault purge -n <name> -l <location>`. Read the vault name from `az keyvault list -g rg-maa-env` before the delete.
   - Never reference `rg-maa-data`, and say so in a comment (FR-027).
-- [ ] T043 [P] [US4] Create `infra/scripts/decommission.sh <dump-path>` (sources `_common.sh`):
+  - *Done 2026-11-18, not run yet (no `az` in the agent container):* the deleted vault's location is read with `az keyvault list-deleted --resource-type vault --query "[?name=='<vault>'].properties.location | [0]"`. Added beyond the task: the script refuses between 10:30 and 14:00 UTC on Tuesday to Saturday unless `MAA_TEARDOWN_ANYTIME=1`, because a teardown then kills the 11:00 run or leaves the rebuilt `log-maa` without the `status=completed` line, which makes `alert-maa-no-completed-run` fire falsely. It exits 0 when `rg-maa-env` does not exist, so a decommission can be rerun. Its closing message says the Twelve Data key must be entered again and `AZURE_CLIENT_ID` set again. quickstart.md §4 has a "Teardown and rebuild" procedure with the safe window.
+- [X] T043 [P] [US4] Create `infra/scripts/decommission.sh <dump-path>` (sources `_common.sh`):
   1. Resolve the path with `realpath -m`. Refuse it if it is inside `repo_root`. Refuse an existing file.
   2. Run `teardown.sh`.
   3. `db-access.sh open`.
@@ -427,12 +428,14 @@ FR-027, FR-030 to FR-032).
   7. `az lock delete -n lock-maa-data -g rg-maa-data`, then `az group delete -n rg-maa-data --yes`.
 
   Stop at the first failure, before step 7. Never upload the file (FR-031).
-- [ ] T044 [P] [US4] Create `infra/scripts/restore.sh <dump-path>` (sources `_common.sh`):
+  - *Done 2026-11-18, not run yet:* `pg_dump -Fc -f` writes into the file's directory, mounted at `/work-dump` (not through a pipe, which would lose the custom format's data offsets). `pg_client` gains `PG_CLIENT_DIR` and `PG_CLIENT_DIR_MODE` for that mount and runs that container with `--security-opt label=disable` instead of relabelling the owner's directory with `:Z`. The script also refuses a path whose directory does not exist, prints the `detection_runs` count before the export (for SC-009), and closes owner-access on any exit before step 7.
+- [X] T044 [P] [US4] Create `infra/scripts/restore.sh <dump-path>` (sources `_common.sh`):
   - Require an existing, non-empty file.
   - `db-access.sh open`.
   - Refuse if `SELECT to_regclass('public.detection_runs')` is non-null and the table has rows.
   - `pg_restore --no-owner --role=id-maa-job --exit-on-error -d "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=/etc/ssl/certs/ca-certificates.crt"` through `pg_client` (T023 fix).
   - Print `SELECT count(*) FROM detection_runs`, then `db-access.sh close` (FR-032).
+  - *Done 2026-11-18, not run yet:* it also refuses when `detection_runs` exists but is empty (the job has already run its migrations, so `pg_restore` would collide with the tables), and it restores with `--single-transaction`, so a failure leaves nothing behind. `db-access.sh close` runs on every exit. New helper `admin_conninfo` in `_common.sh` builds the admin-group connection string used by both scripts.
 - [ ] T045 [US4] (owner, host) Validate quickstart.md §4 rows US4-2, US4-3/4/SC-005 and US4-5/FR-030:
   - A rerun of `deploy.sh` shows a what-if with no changes.
   - `teardown.sh`, then at once `deploy.sh` and `gh workflow run ci.yml --ref main`, then a manual start, reports the last stored day as "already stored", with all earlier days present and no bootstrap needed.
