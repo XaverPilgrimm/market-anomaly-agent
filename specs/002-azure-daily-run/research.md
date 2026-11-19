@@ -522,6 +522,22 @@ together with `autoMitigate: false` was accepted and is live. A deliberate faili
 2026-11-17 succeeded in about 13 minutes, and rule 2 (`alert-maa-no-completed-run`) sent no
 email that day, so its 12:45–13:45 UTC evaluation found the `status=completed` line as intended.
 
+*Teardown and rebuild 2026-11-18 (tasks.md T045):*
+- **The workspace keeps its logs.** Deleting `rg-maa-env` only soft-deletes `log-maa`.
+  `deploy.sh` recreated it with the same name, resource group and region within the soft-delete
+  period, which recovered the old workspace with its data: logs since 2026-11-13 were still
+  queryable. The earlier statement in this plan that a teardown empties `log-maa` was wrong and is
+  corrected in the quickstart, `teardown.sh`, plan.md and tasks.md. The job's execution list does
+  start empty, because the job is a new resource. `skipQueryValidation: true` stays: it costs
+  nothing and covers a workspace that really is new (a first deployment, or one past its
+  soft-delete period).
+- **A rule can fail right after the workspace is created.** The first `deploy.sh` failed on
+  `alert-maa-no-completed-run` only, with `BadRequest` "The workspace could not be found", although
+  the rule depends on the workspace in the template; every other resource was created. A second
+  `deploy.sh` a few minutes later succeeded. This looks like the alerts service not yet seeing the
+  just-created workspace, not a template error; the quickstart's teardown and rebuild procedure now
+  says to rerun `deploy.sh`.
+
 ## R10. Monthly cost estimate and budget
 
 **Cap**: the constitution (v1.2.0, Principle V) sets the Azure cap at **EUR 30** per month. It is

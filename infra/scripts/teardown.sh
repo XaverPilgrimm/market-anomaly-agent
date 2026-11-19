@@ -9,9 +9,10 @@
 #
 # Timing (quickstart.md §4, "Teardown and rebuild"): the job runs at 11:00 UTC, Tuesday to
 # Saturday, and alert-maa-no-completed-run checks between 12:45 and 13:45 UTC that it completed.
-# Between 10:30 and 14:00 UTC on those days a teardown would kill a running execution or leave the
-# rebuilt, empty workspace without the completed line, so the script refuses then unless
-# MAA_TEARDOWN_ANYTIME=1 is set.
+# Between 10:30 and 14:00 UTC on those days a teardown can kill a running execution, so the day
+# has no completed line and the rebuilt check alerts; the script refuses then unless
+# MAA_TEARDOWN_ANYTIME=1 is set. (log-maa itself keeps its logs: recreating it under the same
+# name, group and region within its soft-delete period recovers the old workspace with its data.)
 #
 # After a teardown the vault is gone for good: deploy.sh then asks for the Twelve Data key again.
 
@@ -47,7 +48,7 @@ vault="$(az keyvault list -g "$ENV_RG" --query "[0].name" -o tsv)"
 
 cat <<EOF
 This deletes resource group $ENV_RG and everything in it:
-  log-maa (logs), cae-maa, job-maa-detect, ${vault:-the Key Vault} (then purged, with the
+  log-maa (soft-deleted; recovered with its logs by the redeploy), cae-maa, job-maa-detect, ${vault:-the Key Vault} (then purged, with the
   Twelve Data key), id-maa-github (its client ID changes on redeploy), ag-maa-owner and both alerts.
 The database group, the database, the job identity and the budget are not touched.
 EOF
