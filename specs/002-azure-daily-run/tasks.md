@@ -396,7 +396,9 @@ execution makes at most 3 attempts, stores nothing, and the owner gets a failure
   - *Note 2026-11-14, open:* the quickstart.md Q4 command `az containerapp job start … --args "--date" "2026-11-08"` will likely fail with "unrecognized arguments", as `--args "-c" …` did in Q3 (T037), because the Azure CLI parses a value that starts with `-` as its own option. Check `az containerapp job start --help` on the host and decide the override method (for example `--yaml`, or `--args=…`) before running Q4; fix the Q4 row then.
   - *Updated 2026-11-14:* quickstart.md §3 now has a "Q4 failing start" block using `--args=--date=2026-11-08` with `--image`, `--container-name`, `--cpu` and `--memory` given explicitly, plus a `--yaml` fallback. It is unverified until checked with `--help` on the host.
   - *Done 2026-11-14/16:* the `--args=` form worked (no "unrecognized arguments"); 3 failed attempts; first email about 8 minutes after the start, plus one duplicate. Columns `JobName_s` and `ContainerJobName_s` confirmed; reasons `Error` (per attempt), `BackoffLimitExceeded` and, from Q3, `DeadlineExceeded` (per execution). Pinned in `infra/modules/env.bicep` (see T035) and recorded in research R9 and quickstart.md Q4. `Microsoft.Insights` was `NotRegistered` and was registered by hand on 2026-11-14; `infra/scripts/preflight.sh` now checks the providers the templates use (Microsoft.App, Microsoft.Consumption, Microsoft.DBforPostgreSQL, Microsoft.Insights, Microsoft.KeyVault, Microsoft.ManagedIdentity, Microsoft.OperationalInsights) and prints `az provider register -n <namespace> --wait` for each missing one. Redeployed with the pinned rule; retest 2026-11-16: a deliberate failing start at 21:22 UTC sent exactly one email (research R9, quickstart.md Q4).
-- [ ] T040 [US3] (owner, host) Validate quickstart.md §4 row US3/SC-008: set an invalid value with `az keyvault secret set`, start once, and confirm ≤ 3 attempts, nothing stored and a failure email. Then restore the real key.
+- [X] T040 [US3] (owner, host) Validate quickstart.md §4 row US3/SC-008: set an invalid value with `az keyvault secret set`, start once, and confirm ≤ 3 attempts, nothing stored and a failure email. Then restore the real key.
+  - *Done 2026-11-24 (SC-008 passed):* an invalid key was set in the vault at 10:13 UTC; the job's secret reference synced at 10:33 UTC. The scheduled execution at 11:00 UTC failed after exactly 3 attempts. Each attempt stopped at its first vendor request (QQQ, HTTP 401) with "price data unavailable, nothing stored", so there were 3 vendor requests in total, not the up to 303 the quickstart allowed for. System logs: `BackoffLimitExceeded` once for the execution; per replica `ContainerTerminated` and `ProcessExited` (3 each), and no `Error` as in Q4. The per-replica reasons vary between failures, which confirms keying `alert-maa-execution-failed` on the execution-level reasons only (T035, research R9). `alert-maa-execution-failed` fired at 11:06:38 UTC. `alert-maa-no-completed-run` fired at 13:08:21 UTC and resolved by itself at 15:09:20 UTC: that rule is stateful, while the failure rule is stateless with a 1-hour mute. The real key was restored from `.env` through a shell variable, never printed.
+  - *Consequence:* the trading day 2026-11-23 was left unevaluated, and `--latest` cannot reach a past day. It was filled on 2026-11-25 with the new quickstart.md §4 procedure "Backfill a missed day" (deployment-contract.md §6).
 
 **Checkpoint**: failures are bounded, stopped in time and reported.
 
@@ -413,11 +415,12 @@ FR-027, FR-030 to FR-032).
 ### Implementation for User Story 4
 
 - [X] T041 [US4] In `infra/modules/data.bicep`, add `Microsoft.Authorization/locks` `lock-maa-data` at resource-group scope (no `scope` property, so it applies to `rg-maa-data`) with `level: 'CanNotDelete'` and notes `Stored detection results; see deployment-contract.md §6 (decommission)`. It is deployed on every run, so it is in place after every deployment (FR-030). *Pulled forward into US1 (before T028):* the database holds the research record from the first run on, so the lock is part of the first deployment. The teardown, decommission and restore scripts (T042–T044) stay in US4.
-- [ ] T042 [P] [US4] Create `infra/scripts/teardown.sh` (sources `_common.sh`):
+- [X] T042 [P] [US4] Create `infra/scripts/teardown.sh` (sources `_common.sh`):
   - Print what will be deleted and require typing `rg-maa-env` to confirm.
   - `az group delete -n rg-maa-env --yes`, then purge the soft-deleted vault: `az keyvault list-deleted --query "[?name=='kv-maa-<u>']"`, then `az keyvault purge -n <name> -l <location>`. Read the vault name from `az keyvault list -g rg-maa-env` before the delete.
   - Never reference `rg-maa-data`, and say so in a comment (FR-027).
-- [ ] T043 [P] [US4] Create `infra/scripts/decommission.sh <dump-path>` (sources `_common.sh`):
+  - *Done 2026-11-18, not run yet (no `az` in the agent container):* the deleted vault's location is read with `az keyvault list-deleted --resource-type vault --query "[?name=='<vault>'].properties.location | [0]"`. Added beyond the task: the script refuses between 10:30 and 14:00 UTC on Tuesday to Saturday unless `MAA_TEARDOWN_ANYTIME=1`, because a teardown then kills the 11:00 run or leaves the rebuilt `log-maa` without the `status=completed` line, which makes `alert-maa-no-completed-run` fire falsely. *(Corrected 2026-11-18, T045: the rebuilt `log-maa` keeps its logs, because recreating it recovers the soft-deleted workspace, so only the killed-run case and an unfinished rebuild remain; the guard stays.)* It exits 0 when `rg-maa-env` does not exist, so a decommission can be rerun. Its closing message says the Twelve Data key must be entered again and `AZURE_CLIENT_ID` set again. quickstart.md §4 has a "Teardown and rebuild" procedure with the safe window.
+- [X] T043 [P] [US4] Create `infra/scripts/decommission.sh <dump-path>` (sources `_common.sh`):
   1. Resolve the path with `realpath -m`. Refuse it if it is inside `repo_root`. Refuse an existing file.
   2. Run `teardown.sh`.
   3. `db-access.sh open`.
@@ -427,17 +430,26 @@ FR-027, FR-030 to FR-032).
   7. `az lock delete -n lock-maa-data -g rg-maa-data`, then `az group delete -n rg-maa-data --yes`.
 
   Stop at the first failure, before step 7. Never upload the file (FR-031).
-- [ ] T044 [P] [US4] Create `infra/scripts/restore.sh <dump-path>` (sources `_common.sh`):
+  - *Done 2026-11-18, not run yet:* `pg_dump -Fc -f` writes into the file's directory, mounted at `/work-dump` (not through a pipe, which would lose the custom format's data offsets). `pg_client` gains `PG_CLIENT_DIR` and `PG_CLIENT_DIR_MODE` for that mount and runs that container with `--security-opt label=disable` instead of relabelling the owner's directory with `:Z`. The script also refuses a path whose directory does not exist, prints the `detection_runs` count before the export (for SC-009), and closes owner-access on any exit before step 7.
+- [X] T044 [P] [US4] Create `infra/scripts/restore.sh <dump-path>` (sources `_common.sh`):
   - Require an existing, non-empty file.
   - `db-access.sh open`.
   - Refuse if `SELECT to_regclass('public.detection_runs')` is non-null and the table has rows.
   - `pg_restore --no-owner --role=id-maa-job --exit-on-error -d "host=<server-fqdn> dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=/etc/ssl/certs/ca-certificates.crt"` through `pg_client` (T023 fix).
   - Print `SELECT count(*) FROM detection_runs`, then `db-access.sh close` (FR-032).
-- [ ] T045 [US4] (owner, host) Validate quickstart.md §4 rows US4-2, US4-3/4/SC-005 and US4-5/FR-030:
+  - *Done 2026-11-18, not run yet:* it also refuses when `detection_runs` exists but is empty (the job has already run its migrations, so `pg_restore` would collide with the tables), and it restores with `--single-transaction`, so a failure leaves nothing behind. `db-access.sh close` runs on every exit. New helper `admin_conninfo` in `_common.sh` builds the admin-group connection string used by both scripts.
+- [X] T045 [US4] (owner, host) Validate quickstart.md §4 rows US4-2, US4-3/4/SC-005 and US4-5/FR-030:
   - A rerun of `deploy.sh` shows a what-if with no changes.
   - `teardown.sh`, then at once `deploy.sh` and `gh workflow run ci.yml --ref main`, then a manual start, reports the last stored day as "already stored", with all earlier days present and no bootstrap needed.
   - `az group delete -n rg-maa-data` is refused by the lock.
+  - *Partly done 2026-11-18:* (1) A second `deploy.sh` what-if showed no Create and no Delete; its 7 Modify entries are noise (server-managed defaults shown as removals, `reference()` values what-if cannot evaluate, and `ssl_min_protocol_version` going from system-default to user-override at the same value). The empty key prompt skipped the secret, the image stayed current, and the owner answered N (quickstart.md §4, US4-2). (2) `az group delete -n rg-maa-data` was refused with `ScopeLocked` (US4-5). Still open: the teardown and rebuild (US4-3/4, SC-005), so T045 stays unchecked.
+  - *Teardown and rebuild done 2026-11-18, about 20:30–21:10 UTC (US4-3/4, SC-005):* `teardown.sh` deleted `rg-maa-env` and purged the vault; the deleted-vault location lookup worked. `rg-maa-data` and its lock were untouched (`az group exists` for `rg-maa-env` false; the lock still listed). The first `deploy.sh` failed on one resource only, `alert-maa-no-completed-run` (`BadRequest`, "The workspace could not be found"); a second `deploy.sh` a few minutes later succeeded. The owner answered n to `AZURE_CLIENT_ID` by mistake and set it afterwards from `az identity show … --query clientId` piped to `gh secret set` (value never printed); `gh workflow run ci.yml --ref main` then passed, including `azure/login` with the new identity, and replaced the placeholder image. A manual start succeeded in 29 s. Afterwards `detection_runs` held the same days as before with unchanged `computed_at`, so nothing was fetched or written; no bootstrap was needed.
+    - *Finding 1:* `log-maa` was not emptied. Recreating it with the same name, resource group and region within its soft-delete period recovered the old workspace with its data (logs since 2026-11-13 still queryable). The job's execution list did start empty, because the job is a new resource. Corrected in quickstart.md §4, `teardown.sh`'s comments and message, plan.md Complexity Tracking, T042's note and research R9.
+    - *Finding 2:* an alert rule can fail with "The workspace could not be found" right after the workspace is created; rerunning `deploy.sh` fixes it. Added to the quickstart's teardown and rebuild procedure and to research R9. `deploy.sh` is unchanged.
+    - *Confirmed 2026-11-19, with one finding:* the console output of that first manual execution after the rebuild (2 s container runtime) never reached `ContainerAppConsoleLogs_CL`, not even hours later, so the `already stored; nothing fetched` line could not be read. Its system logs did arrive: the real image was pulled, and the container ran for 2 s (21:10:45 to 21:10:47 UTC) and exited 0. Together with the unchanged `detection_runs`, that proves the "already stored" path. The next scheduled execution, on 2026-11-19 at 11:00 UTC, logged normally and succeeded in about 13 minutes.
+    - *Finding 3:* after a rebuild, confirm the already-stored start through its system logs (container runtime and exit code) and `detection_runs`, because the console output of a very short first execution can be missing. Recorded in quickstart.md §4 (US4-3/4) and the README's Lessons learned. All parts of T045 are done.
 - [ ] T046 [US4] (owner, host, optional; only when actually pausing) Validate quickstart.md §5 / SC-009: decommission to a path outside the repository, redeploy, bootstrap, restore, and compare the `detection_runs` counts.
+  - *Not run, by choice (recorded 2026-11-25):* T046 is optional and meant only for an actual pause, which is not planned. The teardown and rebuild (T045) already showed that the infrastructure can be recreated from the repository while the data survives. The decommission, restore and SC-009 stay unvalidated in Azure until the project is actually paused.
 
 **Checkpoint**: the environment is disposable, and the results are not.
 
@@ -452,18 +464,23 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
 ### Implementation for User Story 5
 
-- [ ] T047 [US5] In `infra/main.bicep`, add `Microsoft.Consumption/budgets` `budget-maa-monthly` at subscription scope:
+- [X] T047 [US5] In `infra/main.bicep`, add `Microsoft.Consumption/budgets` `budget-maa-monthly` at subscription scope:
   - `category: 'Cost'`, `amount: budgetAmountEur`, `timeGrain: 'Monthly'`, `timePeriod { startDate: budgetStartDate }`.
   - Three notifications, `actual50`, `actual80` and `actual100`: `enabled: true`, `operator: 'GreaterThanOrEqualTo'`, `threshold` 50, 80 and 100, `thresholdType: 'Actual'`, `contactEmails: [alertEmail]`.
 
   The amount is in the billing currency, EUR (constitution v1.2.0).
-- [ ] T048 [P] [US5] Add an "Azure daily run" section to `README.md`:
+
+  *Done 2026-11-18, not built or deployed yet:* API version `Microsoft.Consumption/budgets@2024-08-01`. The REST reference lists `2026-06-01` as the newest version, but the Bicep template reference could not be read, so the long-established `2024-08-01` is used; `2024-08-01` was accepted on deployment and is kept (T049). No `endDate` (the service defaults it to 10 years). Open risk for later redeploys: the REST reference says a "past start date should be selected within the timegrain period", so a redeploy in a later month with `budgetStartDate = '2026-11-01'` may be rejected; if the what-if or deployment does, record the error here and decide then (for example keep the start date only on creation).
+- [X] T048 [P] [US5] Add an "Azure daily run" section to `README.md`:
   - What runs where and when (Tuesday to Saturday, 11:00 UTC).
   - The deploy, operate, teardown and decommission entry points, with links to `specs/002-azure-daily-run/quickstart.md` and `contracts/deployment-contract.md`.
   - The cost table from research R10 in EUR (GHCR, about EUR 19 per month against the EUR 30 cap).
   - The sentence "Azure budgets only send notifications; they do not stop spending." (FR-028).
   - The note that every `az` and deployment command runs on the host only.
-- [ ] T049 [US5] (owner, host) Validate quickstart.md §4 row US5/FR-028: `az consumption budget show --budget-name budget-maa-monthly` shows EUR 30 with the three actual-cost notifications.
+
+  *Done 2026-11-18:* the cost table uses the check Q2 result (PostgreSQL about EUR 16.30) plus the estimated EUR 1.79 for the two alert rules, so the total reads "about 18" rather than the earlier "about 19" estimate. The table of entry points includes `preflight.sh`, `teardown.sh`, `decommission.sh` and `restore.sh`.
+- [X] T049 [US5] (owner, host) Validate quickstart.md §4 row US5/FR-028: `az consumption budget show --budget-name budget-maa-monthly` shows EUR 30 with the three actual-cost notifications.
+  *Done 2026-11-18:* the what-if showed the budget as the only Create; API version `2024-08-01` was accepted and is kept; `az consumption budget show` returned amount 30.0, Monthly, start 2026-11-01 and thresholds 50/80/100.
 
 **Checkpoint**: all five stories delivered.
 
@@ -471,19 +488,34 @@ documented cost estimate below EUR 30 (FR-028, FR-029, SC-006).
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T050 [P] Update the "Getting started" section of `README.md` so it lists both modes (`uv run detect --date …` and `uv run detect --latest`, optionally with `--migrate`) and links the 002 CLI contract next to the 001 one.
-- [ ] T051 [P] In `specs/001-nasdaq100-anomaly-detection/quickstart.md`, add one note under its run instructions that `--migrate` can replace the separate `python -m market_anomaly_agent.storage.migrate` step. Change nothing else in feature 001's documents.
-- [ ] T052 (owner, host) Validate SC-007 from quickstart.md §4:
+- [X] T050 [P] Update the "Getting started" section of `README.md` so it lists both modes (`uv run detect --date …` and `uv run detect --latest`, optionally with `--migrate`) and links the 002 CLI contract next to the 001 one.
+- [X] T051 [P] In `specs/001-nasdaq100-anomaly-detection/quickstart.md`, add one note under its run instructions that `--migrate` can replace the separate `python -m market_anomaly_agent.storage.migrate` step. Change nothing else in feature 001's documents.
+- [X] T052 (owner, host) Validate SC-007 from quickstart.md §4:
   - `podman image inspect` and an `env` listing of the image show no key.
   - A search of the Actions logs and `log-maa` for the key finds nothing.
   - A password login with `psql` is refused.
   - `workflow_dispatch` on a non-`main` branch fails at `azure/login` with `AADSTS70021`.
-- [ ] T053 (owner, host) Run quickstart.md §6 (the local workflow is unchanged), then let the schedule run for a week to confirm SC-001 (5 trading days stored with no manual action).
-- [ ] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
+
+  *Done 2026-11-18:* a search for the first 6 characters of the key (never printed) found 0 hits in `podman image inspect`, in `env` and `ls -la /app` inside the image, in the logs of the last 10 Actions runs and in `log-maa`. The server's `authConfig` has `activeDirectoryAuth` Enabled and `passwordAuth` Disabled. A `psql` login as `maa-db-admins` with a plain password was refused with `FATAL: The access token has invalid format …`. The branch test was replaced: `publish-deploy` is gated on `main`, so a dispatch on another branch skips it and cannot produce `AADSTS70021`; the evidence is the credential subject ending in `:ref:refs/heads/main` and the live `AADSTS700213` refusal of a non-matching subject on 2026-11-13 (research R7, quickstart.md §4 SC-007 rows).
+- [X] T053 (owner, host) Run quickstart.md §6 (the local workflow is unchanged), then let the schedule run for a week to confirm SC-001 (5 trading days stored with no manual action).
+  - *Part 1, local workflow: passed, run 2026-11-18 in the agent container against the local database (quickstart.md §6). The owner accepted the exit 3 below as the designed FR-018 behaviour, so the local workflow works:*
+    - `uv run detect --date 2026-11-10 --migrate`: exit **3**. Migrations: none pending. It fetched all 101 series, then logged "rejected: 2026-11-10 was already evaluated and the price data fetched now differs from the snapshot stored by that run (FR-018); nothing written". That day was already in the local database from an earlier run, and the vendor's adjusted bars for it have changed since (most likely a later split or dividend adjustment). This is the designed FR-018 behaviour, not a regression, but the §6 command as written only exits 0 on a day that is not yet stored locally, or whose data has not changed.
+    - `uv run detect --latest`: exit 0. It resolved and stored the previous trading day; the last stdout line is the `status=completed` summary.
+    - `uv run pytest`: exit 0 (163 passed). `uv run pytest -m integration`: exit 0 (37 passed).
+  - *Part 2 (SC-001): passed, confirmed 2026-11-24.* The scheduled executions on Tuesday 2026-11-17 through Saturday 2026-11-21 each logged `status=completed` at about 11:13 UTC, each for the previous trading day (2026-11-16 to 2026-11-20): 5 trading days stored with no manual action. The teardown and rebuild on the evening of 2026-11-18 (T045) did not interrupt the schedule.
+- [X] T054 Constitution compliance pass over the whole diff (Governance: every pull request is checked against the principles). Confirm:
   - No secret in any committed file (`git grep -nE 'td-|PASSWORD=|AccountKey'` reviewed by hand).
   - No personal or tenant identifier in any file (research R16): `git grep -nE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'` may only find Microsoft's documented built-in role definition IDs; `git grep -niE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|onmicrosoft\.com'` finds no email address of the owner and no tenant domain. Known, allowed hits: `noreply@` attribution lines, the vendor's public contact address in feature 001's research.md, and the fake `user:password@host` connection strings in tests and examples.
   - Type hints on every new function.
   - Every new test passed only after being seen failing.
+
+  *Done 2026-11-18, over the branch diff against `main`:*
+  - Secrets: the hits are the empty `POSTGRES_PASSWORD=` placeholder in `.env.example`, the token read into `PGPASSWORD` at run time (`_common.sh`, quickstart.md), task text and the fake `td-SECRET-api-key-0042` in `tests/unit/test_cli.py`. No real secret.
+  - Identifiers: the only GUIDs are Microsoft's built-in Key Vault Secrets User and Secrets Officer role definition IDs (`env.bicep`, task T019). Long numbers are Microsoft Q&A links and a `ca-certificates` package version; no numeric GitHub ID. Email search: the vendor's public address in 001 research.md and fake `user@host` connection strings in tests and examples; no owner address and no tenant domain.
+  - Type hints: `mypy --strict` over `src` and `tests` reports no issues (44 files), so every function is annotated.
+  - Test-first: the US2 tests (T030, T031) and the computed_at tests (T055) were committed red and seen failing for the expected reason before the code; the US1 tests (T009 to T011) were written under "write first, see them fail", but neither tasks.md nor the git history records their red run (no separate red commit), so that part cannot be confirmed from the record. US3 to US5 added no Python.
+  - Checks at this pass: ruff and ruff format clean; 163 unit tests pass. Integration suite rerun on 2026-11-18 against the local PostgreSQL: 37 passed.
+  - Deviations with a complexity cost are recorded in plan.md, Complexity Tracking (teardown time-window guard, `pg_client` directory mount).
 - [X] T055 *Added after the first deployment (2026-11-13):* make `computed_at` the time the computation is performed (feature 001 FR-014), fixing the code, not the spec. The first Azure run stored `computed_at` 09:05:03 UTC for a run that started at 09:04:29 and fetched until about 09:18: `cli.py` passed `datetime.now(UTC)`, taken once before the fetch, and `run_detection` stored it as `computed_at`, while `save_run` reused it as every bar's `fetched_at`.
   - Tests first (committed red): `test_fetch_start_and_computation_instants_come_from_the_injected_clock` (unit; a fake clock moved forward one minute per fetch, read exactly twice), `test_the_injected_clock_is_passed_to_run_detection` (unit, CLI) and `test_bars_store_the_fetch_start_and_the_run_the_computation_instant` (integration).
   - `run_detection(evaluated_date, tickers, source, clock)` now takes the injected clock (`Callable[[], datetime]`) and reads it twice: `fetched_at` right before the first fetch, and `computed_at` after every bar has been fetched, right before the computation. To make that possible, all bars are fetched first and evaluated afterwards; the "skipped …" log lines for gaps and short history therefore now follow all "fetched …" lines. The benchmark is still checked straight after its fetch, so an unusable benchmark still aborts before any other request.
@@ -569,3 +601,21 @@ Task: "T022 [US1] infra/scripts/entra-bootstrap.sh"
 - [P] tasks touch different files and depend on no incomplete task.
 - Owner tasks are the only ones that touch Azure, GitHub settings or the real database.
 - Claude Code never commits, pushes or merges. The owner reviews each change and commits.
+
+### Follow-ups for a later feature (not part of 002)
+
+Recorded 2026-11-18 from the T053 part 1 run. They have no task ID and are not required for 002.
+
+- **Say what differs when a rerun is rejected under FR-018** (feature 001). The rejection only
+  says that the fetched data differs from the stored snapshot. It should also log which tickers
+  and which bar fields differ, so the cause (for example a later split or dividend adjustment)
+  can be seen without a manual comparison.
+- **Document the price adjustment the Twelve Data requests use.** State whether the requested
+  bars are adjusted for splits only or for dividends as well, and why that choice is right for
+  market-model abnormal returns (stock and benchmark adjusted the same way, and how this
+  interacts with FR-018 when the vendor re-adjusts past bars).
+- **Name a rejected API key clearly** (recorded 2026-11-24, T040). A vendor HTTP 401 currently
+  ends as "price data unavailable, nothing stored". Map it to a clear "API key rejected" message.
+- **Consider not retrying authentication failures** (recorded 2026-11-24, T040). Container Apps
+  retries any non-zero exit, so a rejected key costs 3 attempts. The cost is small (one vendor
+  request per attempt), but a distinct exit code or an early stop would make the failure plainer.

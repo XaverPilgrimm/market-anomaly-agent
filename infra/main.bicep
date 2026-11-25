@@ -112,6 +112,51 @@ module env 'modules/env.bicep' = {
   }
 }
 
+// --- Monthly budget (FR-028, constitution Principle V, research R10) ---------------------------
+// Subscription scope, outside both resource groups, so teardown.sh leaves it in place. The amount
+// is in the billing currency, EUR. Budgets only send notifications; they never stop spending.
+// No endDate: the service defaults it to 10 years after the start.
+resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
+  name: 'budget-maa-monthly'
+  properties: {
+    category: 'Cost'
+    amount: budgetAmountEur
+    timeGrain: 'Monthly'
+    timePeriod: {
+      startDate: budgetStartDate
+    }
+    notifications: {
+      actual50: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 50
+        thresholdType: 'Actual'
+        contactEmails: [
+          alertEmail
+        ]
+      }
+      actual80: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 80
+        thresholdType: 'Actual'
+        contactEmails: [
+          alertEmail
+        ]
+      }
+      actual100: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 100
+        thresholdType: 'Actual'
+        contactEmails: [
+          alertEmail
+        ]
+      }
+    }
+  }
+}
+
 // Passed by deploy.sh straight to GitHub repository secrets (never printed or written to a file).
 output AZURE_CLIENT_ID string = env.outputs.githubIdentityClientId
 output AZURE_TENANT_ID string = tenant().tenantId

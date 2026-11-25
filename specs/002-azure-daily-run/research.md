@@ -326,6 +326,15 @@ instead of an app registration, so everything stays in Bicep without Microsoft G
   `githubRepositoryId`. The IDs never change, even if the repository or owner is renamed; the names
   in the subject would then need a redeploy.
 
+**Branch restriction, as validated** (SC-007, recorded 2026-11-18): the planned test, a
+`workflow_dispatch` on another branch expected to fail with `AADSTS70021`, cannot work as
+written: `publish-deploy` runs only for `refs/heads/main`, so on another branch it is skipped and
+no token is ever requested. The restriction is shown instead by the credential's subject, which
+ends with `:ref:refs/heads/main`, and by Entra's live refusal of a non-matching subject
+(`AADSTS700213` on 2026-11-13, above). A token for any other ref carries a different subject and
+is refused the same way. The gate in the workflow and the subject in the credential are two
+independent layers.
+
 **Sign-in values as secrets, gated by a variable** (recorded 2026-11-13):
 
 - **Problem:** the same `azure/login` run printed `client-id`, `tenant-id` and `subscription-id` in
@@ -513,6 +522,22 @@ together with `autoMitigate: false` was accepted and is live. A deliberate faili
 2026-11-17 succeeded in about 13 minutes, and rule 2 (`alert-maa-no-completed-run`) sent no
 email that day, so its 12:45–13:45 UTC evaluation found the `status=completed` line as intended.
 
+*Teardown and rebuild 2026-11-18 (tasks.md T045):*
+- **The workspace keeps its logs.** Deleting `rg-maa-env` only soft-deletes `log-maa`.
+  `deploy.sh` recreated it with the same name, resource group and region within the soft-delete
+  period, which recovered the old workspace with its data: logs since 2026-11-13 were still
+  queryable. The earlier statement in this plan that a teardown empties `log-maa` was wrong and is
+  corrected in the quickstart, `teardown.sh`, plan.md and tasks.md. The job's execution list does
+  start empty, because the job is a new resource. `skipQueryValidation: true` stays: it costs
+  nothing and covers a workspace that really is new (a first deployment, or one past its
+  soft-delete period).
+- **A rule can fail right after the workspace is created.** The first `deploy.sh` failed on
+  `alert-maa-no-completed-run` only, with `BadRequest` "The workspace could not be found", although
+  the rule depends on the workspace in the template; every other resource was created. A second
+  `deploy.sh` a few minutes later succeeded. This looks like the alerts service not yet seeing the
+  just-created workspace, not a template error; the quickstart's teardown and rebuild procedure now
+  says to rerun `deploy.sh`.
+
 ## R10. Monthly cost estimate and budget
 
 **Cap**: the constitution (v1.2.0, Principle V) sets the Azure cap at **EUR 30** per month. It is
@@ -565,6 +590,8 @@ in EUR before the first deployment.
 This replaces the third-party PostgreSQL figures above (EUR 17.09 for compute and storage together)
 for France Central. With the alert rules at the estimated EUR 1.79 the total would be about
 EUR 18.09 (60% of the cap), still below EUR 24.
+
+*Budget implemented 2026-11-18 (tasks.md T047):* `Microsoft.Consumption/budgets@2024-08-01` at subscription scope, `budget-maa-monthly`, EUR 30, notifications `actual50`, `actual80` and `actual100` (`GreaterThanOrEqualTo`, `Actual`) to the deployment-time address. It is outside both resource groups, so a teardown keeps it. *Deployed 2026-11-18:* the what-if showed it as the only Create, Azure accepted API version `2024-08-01` (kept), and `az consumption budget show` returned amount 30.0, Monthly, start 2026-11-01 and thresholds 50/80/100 (tasks.md T049).
 
 **Watch items**: Microsoft Defender for Cloud plans must stay off (they bill per resource). A
 General Purpose SKU, high availability or geo-redundant backup would each break the cap and are

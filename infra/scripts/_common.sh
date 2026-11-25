@@ -43,14 +43,31 @@ PG_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 #
 # The postgres:17 image has no trusted roots in /etc/ssl/certs, so sslrootcert=system fails there
 # with "certificate verify failed"; the host's bundle is mounted instead.
+#
+# A caller that needs a host directory inside the container (pg_dump -f, pg_restore of a file)
+# sets PG_CLIENT_DIR to that directory and PG_CLIENT_DIR_MODE to ro or rw; it is mounted at
+# /work-dump. SELinux separation is disabled for that one throwaway container instead of
+# relabelling the owner's directory (:Z would change the label of a private directory).
+PG_CLIENT_DIR=""
+PG_CLIENT_DIR_MODE=ro
 pg_client() {
     if [[ ! -s $PG_CA_BUNDLE ]]; then
         echo "CA bundle $PG_CA_BUNDLE not found on this host; it is needed to verify the server" >&2
         exit 1
     fi
+    local extra=()
+    if [[ -n $PG_CLIENT_DIR ]]; then
+        extra=(--security-opt label=disable -v "$PG_CLIENT_DIR:/work-dump:$PG_CLIENT_DIR_MODE")
+    fi
     podman run --rm -i -e PGPASSWORD --network host \
         -v "$PG_CA_BUNDLE:$PG_CA_BUNDLE:ro" \
+        "${extra[@]}" \
         docker.io/library/postgres:17 "$@"
+}
+
+# Connection string of the owner's admin-group session to market_anomaly_agent (research R16).
+admin_conninfo() {
+    echo "host=$1 dbname=market_anomaly_agent user=maa-db-admins sslmode=verify-full sslrootcert=$PG_CA_BUNDLE"
 }
 
 # Name and host name of the PostgreSQL server in rg-maa-data, read at run time.
