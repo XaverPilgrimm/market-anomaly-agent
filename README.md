@@ -77,7 +77,7 @@ database and the job's identity, carries a delete lock and survives every rebuil
 | Feature | Status |
 |---|---|
 | [001](specs/001-nasdaq100-anomaly-detection/spec.md) Nasdaq-100 anomaly detection (CLI, PostgreSQL) | Done |
-| [002](specs/002-azure-daily-run/spec.md) Unattended daily run on Azure | Deployed and running on schedule; final checks open (a week of unattended runs, a bad-key test) |
+| [002](specs/002-azure-daily-run/spec.md) Unattended daily run on Azure | Deployed and running on schedule; a week of unattended runs and the bad-key test passed |
 | 003 An agent that explains flagged anomalies with web search | Next |
 | 004 A public website | Later, and only once the data vendor permits public display (see [Data](#data)) |
 
@@ -169,6 +169,8 @@ and fixes. Details are in the linked task or research entry.
 | Logs were still there after a teardown and rebuild | Recreating a Log Analytics workspace under the same name within its soft-delete period recovers it with its data | Documentation corrected; the teardown time guard kept for its other reason ([T045](specs/002-azure-daily-run/tasks.md), [R9](specs/002-azure-daily-run/research.md#r9-failure-alerting)) |
 | An alert rule failed with "The workspace could not be found" on rebuild | The alerts service did not yet see the just-created workspace | Rerun `deploy.sh`; documented in the rebuild procedure ([T045](specs/002-azure-daily-run/tasks.md), [R9](specs/002-azure-daily-run/research.md#r9-failure-alerting)) |
 | The "already stored" log line of the first start after a rebuild never arrived | The console output of that very short execution (2 s) never reached Log Analytics; its system logs did | Confirm that start through its system logs (container runtime, exit code 0) and the unchanged `detection_runs` ([T045](specs/002-azure-daily-run/tasks.md), [quickstart §4](specs/002-azure-daily-run/quickstart.md)) |
+| Per-attempt failure reasons differed between failures (`Error` in one test, `ContainerTerminated` and `ProcessExited` in another) | The platform's per-replica reasons are not stable or documented | Alert only on the execution-level reasons `BackoffLimitExceeded` and `DeadlineExceeded`, confirmed by the bad-key test ([T040](specs/002-azure-daily-run/tasks.md), [R9](specs/002-azure-daily-run/research.md#r9-failure-alerting)) |
+| A one-off start with a different date needs every setting repeated | Overriding a job start replaces the whole container definition, including its environment variables | The backfill procedure passes the image, resources and all environment variables, read from the job definition; the identity is kept ([T040](specs/002-azure-daily-run/tasks.md), [quickstart §4](specs/002-azure-daily-run/quickstart.md)) |
 
 ## Known limitations
 

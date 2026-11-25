@@ -199,7 +199,7 @@ rm ~/maa-q3.yaml
 | US2 / SC-003 | Holiday | The morning after a market holiday (or a unit test with an injected clock) | Resolves to the trading day before the holiday: already stored, exit 0, no exit 3 *Covered by the T030 unit test (Fri 2026-11-27 resolves to Wed 2026-11-25). Azure confirmation possible with the scheduled run on 2026-11-27, after Thanksgiving.* |
 | US1-3, US1-5, SC-010 | Pipeline | Open a pull request: checks run, `publish-deploy` is skipped, no Azure login in the log. Merge: a new `:<sha>` tag appears and the job shows that image. | As described |
 | US1-4 | Failing checks block delivery | Open a pull request with a deliberate `ruff` violation and confirm `checks` fails. Read `ci.yml` to confirm `publish-deploy` has `needs: checks` (so a failing push to `main` cannot reach it). Close the pull request unmerged. | `checks` red, `publish-deploy` not run, no new tag, job image unchanged |
-| US3, SC-008 | Bounded retries | Temporarily set the vault secret to an invalid key: `vault=$(az keyvault list -g rg-maa-env --query "[0].name" -o tsv)`, then `az keyvault secret set --vault-name "$vault" --name twelve-data-api-key --value invalid-sc008 --output none`. The job picks up a new secret version only after a delay (Container Apps refreshes Key Vault references periodically, up to about 30 minutes), so wait before `az containerapp job start -n job-maa-detect -g rg-maa-env`, and check the log shows an authentication error, not a normal fetch. Restore the real key afterwards with `deploy.sh` (type it at the key prompt) and wait again before the next scheduled run. | ≤ 3 attempts, about 303 vendor requests at most, nothing stored, failure email |
+| US3, SC-008 | Bounded retries | Temporarily set the vault secret to an invalid key: `vault=$(az keyvault list -g rg-maa-env --query "[0].name" -o tsv)`, then `az keyvault secret set --vault-name "$vault" --name twelve-data-api-key --value invalid-sc008 --output none`. The job picks up a new secret version only after a delay (Container Apps refreshes Key Vault references periodically, up to about 30 minutes), so wait before `az containerapp job start -n job-maa-detect -g rg-maa-env`, and check the log shows an authentication error, not a normal fetch. Restore the real key afterwards with `deploy.sh` (type it at the key prompt) and wait again before the next scheduled run. | ≤ 3 attempts, about 303 vendor requests at most, nothing stored, failure email *Result 2026-11-24: invalid key set at 10:13 UTC, synced at 10:33 UTC; the 11:00 UTC scheduled execution failed after exactly 3 attempts, each stopping at its first vendor request (HTTP 401) with "price data unavailable, nothing stored", so 3 vendor requests in total. `alert-maa-execution-failed` fired about 7 minutes after the start; `alert-maa-no-completed-run` fired at 13:08 UTC and resolved by itself at 15:09 UTC (stateful rule). The per-replica reasons were `ContainerTerminated` and `ProcessExited`, not `Error` as in Q4; the execution-level `BackoffLimitExceeded` was logged once, as the failure rule expects. Real key restored from `.env` through a shell variable. Passed. The day it cost was filled with "Backfill a missed day" below.* |
 | US4-2, FR-026 | Idempotent deploy | `deploy.sh` again, no changes | What-if shows no changes (except a rule left open) *Result 2026-11-18: no Create and no Delete. The 7 Modify entries are what-if noise, not drift: server-managed defaults shown as removals (PostgreSQL `dataEncryption`, `replica`, `replicationRole`, storage `iops`/`tier`/`type`; `cae-maa` `environmentMode`, `peerAuthentication`, `peerTrafficConfiguration`, `publicNetworkAccess`; `isolationScope` on both identities), `reference()` values what-if cannot evaluate (the job's `keyVaultUrl` and env values, a role assignment's `principalId`, `cae-maa`'s `customerId`), and `ssl_min_protocol_version` shown as system-default → user-override at the same value. The empty key prompt skipped the vault secret and the job image stayed the current one. Answered N; nothing applied. Passed.* |
 | US4-3/4, SC-005 | Teardown and rebuild | Follow "Teardown and rebuild" below: `teardown.sh`, then at once `deploy.sh` (enter the key again) and `gh workflow run ci.yml --ref main`, then a manual start | Redeploy succeeds; no bootstrap needed (identity kept); the next execution says "already stored" for the last day; all earlier days are still present *Result 2026-11-18 (about 20:30–21:10 UTC): `teardown.sh` deleted `rg-maa-env` and purged the vault (the deleted-vault location lookup worked); `rg-maa-data` and its lock were untouched. The first `deploy.sh` failed on `alert-maa-no-completed-run` only (`BadRequest`, "The workspace could not be found"); a second run a few minutes later succeeded. `AZURE_CLIENT_ID` was set afterwards by hand (see the procedure below), then `gh workflow run ci.yml --ref main` passed, including `azure/login` with the new identity, and replaced the placeholder image. A manual start succeeded in 29 s; `detection_runs` held the same days with unchanged `computed_at`, so nothing was fetched or written. `log-maa` was not emptied: it came back with its earlier logs (procedure below). Confirmed 2026-11-19: that start's console output never reached `ContainerAppConsoleLogs_CL`, even hours later, but its system logs did: the real image was pulled, and the container ran for 2 s and exited 0. With `detection_runs` unchanged, that proves the "already stored" path. The next scheduled execution logged normally. Passed. After a rebuild, confirm the already-stored start through its system logs (container runtime and exit code) and `detection_runs`, because the console output of a very short first execution can be missing.* |
 | US4-5, FR-030 | Lock | `az group delete -n rg-maa-data` | Refused by the lock *Result 2026-11-18: refused with `ScopeLocked`. Passed.* |
@@ -265,6 +265,37 @@ az containerapp job start -n job-maa-detect -g rg-maa-env
   That console line can be missing for this first, very short execution (*observed 2026-11-19*,
   T045): confirm it instead through its system logs (`ContainerAppSystemLogs_CL`: the container
   runtime and exit code 0) and an unchanged `detection_runs`.
+
+**Backfill a missed day** (*validated 2026-11-25*, after T040). `--latest` evaluates only the most
+recent completed trading day, so a day lost to a failed run (for example during the SC-008 test)
+is never picked up by the schedule. Start one execution with a one-off override instead:
+
+- Only for a trading day that is not stored yet; a stored day reproduces or exits 3 (FR-018).
+- Not between 10:30 and 14:00 UTC on Tuesday to Saturday, so it does not overlap the scheduled
+  run or its completion check. It uses about 101 of the 800 daily vendor credits.
+- The override replaces the whole container definition, so the image, container name, CPU, memory
+  and **every environment variable** must be passed, or the execution starts without its database
+  URL and key. The job's identity is kept. All values are read from the job definition at run time
+  and never printed or written to a file. Check the flags with `az containerapp job start --help`
+  first.
+
+```bash
+job=(-n job-maa-detect -g rg-maa-env)
+c="properties.template.containers[0]"
+image=$(az containerapp job show "${job[@]}" --query "$c.image" -o tsv)
+env_value() { az containerapp job show "${job[@]}" --query "$c.env[?name=='$1'].value | [0]" -o tsv; }
+key_ref=$(az containerapp job show "${job[@]}" --query "$c.env[?name=='PRICE_DATA_API_KEY'].secretRef | [0]" -o tsv)
+az containerapp job start "${job[@]}" \
+  --image "$image" --container-name detect --cpu 0.5 --memory 1.0Gi \
+  --env-vars "DATABASE_URL=$(env_value DATABASE_URL)" "DATABASE_AUTH=$(env_value DATABASE_AUTH)" \
+             "AZURE_CLIENT_ID=$(env_value AZURE_CLIENT_ID)" "PRICE_DATA_API_KEY=secretref:$key_ref" \
+  --args=--date=YYYY-MM-DD --output none
+az containerapp job execution list "${job[@]}" -o table
+```
+
+Expected: the execution succeeds in about 13 minutes, and its log shows `mode=date` and
+`status=completed` for that day. *Result 2026-11-25: as expected for the day left by the SC-008
+test.* One day per start; there is no catch-up mode (contracts/cli-contract.md).
 
 ## 5. Decommission and restore (only when pausing or ending the project)
 
