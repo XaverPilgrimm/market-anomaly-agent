@@ -195,3 +195,9 @@ Showing the data, or results derived from it, publicly is blocked until Twelve D
 permission (see
 [research.md §1](specs/001-nasdaq100-anomaly-detection/research.md)). This repository therefore
 contains no prices, returns or run results. The tests use synthetic data.
+
+## License
+
+The code is released under the [MIT License](LICENSE). The license covers the code only. The
+repository contains no market data: prices from Twelve Data stay subject to the vendor's terms
+(see [Data](#data)).
