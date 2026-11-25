@@ -77,7 +77,7 @@ database and the job's identity, carries a delete lock and survives every rebuil
 | Feature | Status |
 |---|---|
 | [001](specs/001-nasdaq100-anomaly-detection/spec.md) Nasdaq-100 anomaly detection (CLI, PostgreSQL) | Done |
-| [002](specs/002-azure-daily-run/spec.md) Unattended daily run on Azure | Deployed and running on schedule; a week of unattended runs and the bad-key test passed |
+| [002](specs/002-azure-daily-run/spec.md) Unattended daily run on Azure | Done: running unattended on schedule (the optional decommission-and-restore check was not run) |
 | 003 An agent that explains flagged anomalies with web search | Next |
 | 004 A public website | Later, and only once the data vendor permits public display (see [Data](#data)) |
 
